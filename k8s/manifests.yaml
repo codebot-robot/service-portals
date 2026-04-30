@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-portal
+  labels:
+    app: service-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-portal
+  template:
+    metadata:
+      labels:
+        app: service-portal
+    spec:
+      containers:
+      - name: service-portal
+        image: service-portal:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: TARGET_URL
+          value: "https://generativelanguage.googleapis.com"
+        - name: UPSTREAM_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: service-portal-secret
+              key: token
+              optional: true
+        - name: UPSTREAM_AUTH_HEADER
+          value: "Authorization"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca/tls.key"
+        volumeMounts:
+        - name: ca-cert
+          mountPath: /etc/service-portal/ca
+          readOnly: true
+      volumes:
+      - name: ca-cert
+        secret:
+          secretName: service-portal-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-portal
+spec:
+  selector:
+    app: service-portal
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: service-portal-selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: service-portal-ca
+spec:
+  isCA: true
+  commonName: service-portal-ca
+  secretName: service-portal-ca
+  issuerRef:
+    name: service-portal-selfsigned-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: service-portal-issuer
+spec:
+  ca:
+    secretName: service-portal-ca

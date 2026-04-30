@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bump-portal
+  labels:
+    app: bump-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bump-portal
+  template:
+    metadata:
+      labels:
+        app: bump-portal
+    spec:
+      containers:
+      - name: bump-portal
+        image: bump-portal:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: TARGET_URL
+          value: "https://github.com/"
+        - name: UPSTREAM_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: bump-portal-secret
+              key: token
+              optional: true
+        - name: UPSTREAM_AUTH_HEADER
+          value: "Authorization"
+        - name: CA_CERT_PATH
+          value: "/etc/bump-portal/ca/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/bump-portal/ca/tls.key"
+        volumeMounts:
+        - name: ca-cert
+          mountPath: /etc/bump-portal/ca
+          readOnly: true
+      volumes:
+      - name: ca-cert
+        secret:
+          secretName: bump-portal-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bump-portal
+spec:
+  selector:
+    app: bump-portal
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: bump-portal-selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: bump-portal-ca
+spec:
+  isCA: true
+  commonName: bump-portal-ca
+  secretName: bump-portal-ca
+  issuerRef:
+    name: bump-portal-selfsigned-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: bump-portal-issuer
+spec:
+  ca:
+    secretName: bump-portal-ca

@@ -1,0 +1,119 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+
+	"github.com/gke-labs/service-portals/pkg/proxy"
+)
+
+func TestProxyInjectsAuthToken(t *testing.T) {
+	expectedToken := "secret-token"
+
+	// 1. Start a mock HTTPS backend
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+expectedToken {
+			t.Errorf("Expected Authorization header 'Bearer %s', got '%s'", expectedToken, auth)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("Failed to parse backend URL: %v", err)
+	}
+
+	// 2. Create the proxy
+	p, err := proxy.NewHTTPProxy(backendURL, expectedToken, "Authorization", "", "")
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+
+	// Configure the proxy to trust the test server's certificate
+	p.Transport = backend.Client().Transport
+
+	// 3. Create a request to the proxy
+	req := httptest.NewRequest("GET", "/some/path", nil)
+	w := httptest.NewRecorder()
+
+	// 4. Serve the request
+	p.ServeHTTP(w, req)
+
+	// 5. Verify the response
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status OK, got %v", resp.Status)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "OK" {
+		t.Errorf("Expected body 'OK', got '%s'", string(body))
+	}
+}
+
+func TestProxyInjectsCustomHeader(t *testing.T) {
+	expectedToken := "secret-api-key"
+	expectedHeader := "X-Goog-Api-Key"
+
+	// 1. Start a mock backend
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		val := r.Header.Get(expectedHeader)
+		if val != expectedToken {
+			t.Errorf("Expected %s header '%s', got '%s'", expectedHeader, expectedToken, val)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("Failed to parse backend URL: %v", err)
+	}
+
+	// 2. Create the proxy with custom header
+	p, err := proxy.NewHTTPProxy(backendURL, expectedToken, expectedHeader, "", "")
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+
+	// 3. Create a request to the proxy
+	req := httptest.NewRequest("GET", "/some/path", nil)
+	w := httptest.NewRecorder()
+
+	// 4. Serve the request
+	p.ServeHTTP(w, req)
+
+	// 5. Verify the response
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status OK, got %v", resp.Status)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "OK" {
+		t.Errorf("Expected body 'OK', got '%s'", string(body))
+	}
+}

@@ -1,0 +1,176 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package e2e
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestServicePortal(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "service-portal-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Paths relative to git root
+	h.DockerBuild("service-portal:e2e", filepath.Join(gitRoot, "images/service-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("service-portal:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend (Toolbox Server)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+
+	// Deploy Service Portal
+	h.KubectlApplyContent(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-secret
+stringData:
+  token: e2e-secret-token
+`)
+
+	portalManifestPath := filepath.Join(gitRoot, "k8s/manifests.yaml")
+	b, err := os.ReadFile(portalManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to read portal manifest: %v", err)
+	}
+	portalManifest := string(b)
+	portalManifest = strings.ReplaceAll(portalManifest, "image: service-portal:latest", "image: service-portal:e2e\n        imagePullPolicy: Never")
+	portalManifest = strings.ReplaceAll(portalManifest, "value: \"https://generativelanguage.googleapis.com\"", "value: \"http://backend\"")
+
+	// Install cert-manager
+	h.t.Log("Installing cert-manager")
+	h.RunCommand("kubectl", "apply", "--server-side", "-f", "https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml")
+	// Wait for cert-manager pods to be created
+	time.Sleep(10 * time.Second)
+	// Wait for cert-manager pods to be ready
+	h.WaitForPodReady("app.kubernetes.io/instance=cert-manager", 3*time.Minute)
+
+	h.KubectlApplyContent(portalManifest)
+	h.WaitForDeployment("service-portal", 2*time.Minute)
+
+	// Wait for CA secret to be created by cert-manager
+	h.t.Log("Waiting for CA secret")
+	for i := 0; i < 30; i++ {
+		cmd := exec.Command("kubectl", "get", "secret", "service-portal-ca")
+		if err := cmd.Run(); err == nil {
+			break
+		}
+		if i == 29 {
+			t.Fatal("Timed out waiting for service-portal-ca secret")
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Restart service-portal to ensure it picks up the CA secret (it might have started before the secret was created)
+	h.RunCommand("kubectl", "rollout", "restart", "deployment/service-portal")
+	h.WaitForDeployment("service-portal", 2*time.Minute)
+
+	// Run Client
+	clientPodName := "test-client"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  labels:
+    app: test-client
+spec:
+  containers:
+  - name: toolbox
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/app/toolbox", "client", "https://backend"]
+    env:
+    - name: HTTPS_PROXY
+      value: "http://service-portal:80"
+    - name: SSL_CERT_FILE
+      value: "/etc/ssl/certs/service-portal-ca.crt"
+    volumeMounts:
+    - name: ca-cert
+      mountPath: /etc/ssl/certs/service-portal-ca.crt
+      subPath: tls.crt
+  volumes:
+  - name: ca-cert
+    secret:
+      secretName: service-portal-ca
+  restartPolicy: Never
+`
+	h.KubectlApplyContent(clientManifest)
+
+	h.WaitForPodSuccess(clientPodName, 1*time.Minute)
+
+	logs := h.GetPodLogs(clientPodName)
+	t.Logf("Client logs: %s", logs)
+
+	// Verify
+	if !strings.Contains(logs, "Authorization") {
+		t.Error("Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logs, "Bearer e2e-secret-token") {
+		t.Error("Logs do not contain correct token")
+	}
+}
