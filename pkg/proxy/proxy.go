@@ -99,16 +99,16 @@ func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM 
 	}
 
 	forceTarget := false
-	if host == p.TargetURL.Host {
-		forceTarget = true
+	if p.TargetURL != nil && host == p.TargetURL.Host {
+	        forceTarget = true
 	} else if !isMITM && r.URL.Host == "" {
-		forceTarget = true
+	        forceTarget = true
 	}
 
 	outReq := r.Clone(r.Context())
-	if forceTarget {
-		outReq.URL.Scheme = p.TargetURL.Scheme
-		outReq.URL.Host = p.TargetURL.Host
+	if forceTarget && p.TargetURL != nil {
+	        outReq.URL.Scheme = p.TargetURL.Scheme
+	        outReq.URL.Host = p.TargetURL.Host
 		outReq.Host = p.TargetURL.Host
 
 		if p.AuthToken != "" {
