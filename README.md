@@ -15,6 +15,7 @@ This repository provides specific portals for popular external services:
 *   **Gemini Portal** (`gemini-portal/`): Proxies requests to Google's Generative Language API (`https://generativelanguage.googleapis.com`), automatically injecting the Gemini API key.
 *   **Anthropic Portal** (`anthropic-portal/`): Proxies requests to the Anthropic API, injecting the necessary authentication.
 *   **GitHub Portal** (`github-portal/`): Proxies requests to the GitHub API, handling GitHub authentication.
+*   **Artifact Portal** (`cmd/artifact-portal/`): A caching HTTP/HTTPS forward proxy designed to accelerate package downloads (such as pip installs) in Docker builds. For details, see [docs/accelerating-docker-build.md](docs/accelerating-docker-build.md).
 
 ## Architecture
 
