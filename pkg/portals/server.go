@@ -78,7 +78,7 @@ func Run(ctx context.Context, config Config) error {
 		return fmt.Errorf("failed to create proxy: %w", err)
 	}
 
-	var c *cache.InMemoryCache
+	var c cache.Cache
 	cacheTTL := config.CacheTTL
 	if cacheTTLEnv := os.Getenv("CACHE_TTL"); cacheTTLEnv != "" {
 		if d, err := time.ParseDuration(cacheTTLEnv); err == nil {
@@ -89,18 +89,29 @@ func Run(ctx context.Context, config Config) error {
 	}
 
 	if cacheTTL > 0 {
-		cleanupInterval := 1 * time.Minute
-		if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
-			if d, err := time.ParseDuration(cleanupEnv); err == nil {
-				cleanupInterval = d
-			} else {
-				log.Printf("Warning: invalid CACHE_CLEANUP_INTERVAL %q: %v", cleanupEnv, err)
+		cacheDir := os.Getenv("CACHE_DIR")
+		if cacheDir != "" {
+			dc, err := cache.NewDiskCache(cacheDir)
+			if err != nil {
+				return fmt.Errorf("failed to create disk cache: %w", err)
 			}
+			c = dc
+			log.Printf("Enabled disk caching at %s with TTL %v", cacheDir, cacheTTL)
+		} else {
+			cleanupInterval := 1 * time.Minute
+			if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
+				if d, err := time.ParseDuration(cleanupEnv); err == nil {
+					cleanupInterval = d
+				} else {
+					log.Printf("Warning: invalid CACHE_CLEANUP_INTERVAL %q: %v", cleanupEnv, err)
+				}
+			}
+
+			c = cache.NewInMemoryCache(cleanupInterval)
+			log.Printf("Enabled in-memory caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
 		}
 
-		c = cache.NewInMemoryCache(cleanupInterval)
 		p.Transport = proxy.NewCachingTransport(c, p.Transport, cacheTTL)
-		log.Printf("Enabled caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
 	}
 
 	if config.SetupProxy != nil {

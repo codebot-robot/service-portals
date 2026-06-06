@@ -68,11 +68,11 @@ type RuleRouter struct {
 	caCertPath string
 	caKeyPath  string
 	cacheTTL   time.Duration
-	cache      *cache.InMemoryCache
+	cache      cache.Cache
 }
 
 // NewRuleRouter creates a new RuleRouter instance.
-func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath string, cacheTTL time.Duration, c *cache.InMemoryCache) *RuleRouter {
+func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath string, cacheTTL time.Duration, c cache.Cache) *RuleRouter {
 	return &RuleRouter{
 		routes:     make(map[string]*Rule),
 		fallback:   fallback,
