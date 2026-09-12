@@ -19,6 +19,10 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    groups:
+      dependencies:
+        patterns:
+          - "*"
 
   # Maintain Docker base image versions in all Dockerfiles recursively
   - package-ecosystem: "docker"
