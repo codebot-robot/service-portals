@@ -16,6 +16,8 @@ package cache
 
 import (
 	"bytes"
+	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,5 +48,67 @@ func TestInMemoryCache(t *testing.T) {
 	_, ok = c.Get("key2")
 	if ok {
 		t.Fatal("Expected key2 to be expired")
+	}
+}
+
+func TestDiskCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	c, err := NewDiskCache(tmpDir, 50*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewDiskCache failed: %v", err)
+	}
+
+	// Test Set and Get
+	c.Set("disk_key1", []byte("disk_value1"), 1*time.Minute)
+	val, ok := c.Get("disk_key1")
+	if !ok {
+		t.Fatal("Expected to find disk_key1")
+	}
+	if !bytes.Equal(val, []byte("disk_value1")) {
+		t.Errorf("Expected disk_value1, got %s", val)
+	}
+
+	// Test Open (io.ReadSeekCloser)
+	r, err := c.Open("disk_key1")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	buf := make([]byte, 4)
+	n, err := r.Read(buf)
+	if err != nil || n != 4 || string(buf) != "disk" {
+		t.Errorf("expected read 'disk', got %s (err %v)", string(buf), err)
+	}
+	// Test Seek
+	if _, err := r.Seek(0, 0); err != nil {
+		t.Fatalf("Seek failed: %v", err)
+	}
+	all, err := io.ReadAll(r)
+	if err != nil || string(all) != "disk_value1" {
+		t.Errorf("expected disk_value1 after seek, got %s", string(all))
+	}
+	r.Close()
+
+	// Test Put stream
+	if err := c.Put("stream_key", strings.NewReader("stream_value")); err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+	sVal, ok := c.Get("stream_key")
+	if !ok || string(sVal) != "stream_value" {
+		t.Errorf("expected stream_value, got %s", string(sVal))
+	}
+
+	// Test Delete
+	c.Delete("disk_key1")
+	_, ok = c.Get("disk_key1")
+	if ok {
+		t.Fatal("Expected disk_key1 to be deleted")
+	}
+
+	// Test Expiration
+	c.Set("disk_key2", []byte("disk_value2"), 20*time.Millisecond)
+	time.Sleep(70 * time.Millisecond)
+	_, ok = c.Get("disk_key2")
+	if ok {
+		t.Fatal("Expected disk_key2 to be expired")
 	}
 }
