@@ -15,6 +15,12 @@
 package cache
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -97,6 +103,155 @@ func (c *InMemoryCache) janitor() {
 		for k, v := range c.items {
 			if now.After(v.expiration) {
 				delete(c.items, k)
+			}
+		}
+		c.mu.Unlock()
+	}
+}
+
+// DiskCache is a filesystem-backed implementation of Cache.
+type DiskCache struct {
+	dir             string
+	defaultTTL      time.Duration
+	cleanupInterval time.Duration
+	mu              sync.RWMutex
+}
+
+// NewDiskCache creates a new DiskCache rooted at dir and starts a background janitor.
+func NewDiskCache(dir string, defaultTTL time.Duration, cleanupInterval time.Duration) (*DiskCache, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create cache directory %s: %w", dir, err)
+	}
+	if cleanupInterval <= 0 {
+		cleanupInterval = 10 * time.Minute
+	}
+	c := &DiskCache{
+		dir:             dir,
+		defaultTTL:      defaultTTL,
+		cleanupInterval: cleanupInterval,
+	}
+	go c.janitor()
+	return c, nil
+}
+
+func (c *DiskCache) keyPath(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(c.dir, fmt.Sprintf("%x.cache", sum))
+}
+
+// Open retrieves an item from the disk cache as an io.ReadSeekCloser.
+// The caller is responsible for closing the returned reader.
+func (c *DiskCache) Open(key string) (io.ReadSeekCloser, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	p := c.keyPath(key)
+	info, err := os.Stat(p)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.defaultTTL > 0 && time.Since(info.ModTime()) > c.defaultTTL {
+		go os.Remove(p)
+		return nil, os.ErrNotExist
+	}
+
+	// Explicitly update atime/mtime on access. Modern Linux/Unix filesystems typically
+	// mount with "relatime" or "noatime" where read operations do not immediately update
+	// file access times. Updating mtime ensures our TTL/LRU expiration check reliably sees
+	// when the file was last accessed.
+	now := time.Now()
+	_ = os.Chtimes(p, now, now)
+
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+
+	return f, nil
+}
+
+// Get retrieves an item from the disk cache.
+func (c *DiskCache) Get(key string) ([]byte, bool) {
+	r, err := c.Open(key)
+	if err != nil {
+		return nil, false
+	}
+	defer r.Close()
+
+	val, err := io.ReadAll(r)
+	if err != nil {
+		return nil, false
+	}
+
+	return val, true
+}
+
+// Put streams an item into the disk cache from an io.Reader.
+func (c *DiskCache) Put(key string, r io.Reader) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	tmpFile, err := os.CreateTemp(c.dir, "tmp-cache-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+
+	if _, err := io.Copy(tmpFile, r); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpName)
+		return err
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+
+	p := c.keyPath(key)
+	now := time.Now()
+	_ = os.Chtimes(tmpName, now, now)
+
+	return os.Rename(tmpName, p)
+}
+
+// Set stores an item in the disk cache with a TTL.
+func (c *DiskCache) Set(key string, value []byte, ttl time.Duration) {
+	if ttl > 0 && c.defaultTTL <= 0 {
+		c.defaultTTL = ttl
+	}
+	_ = c.Put(key, bytes.NewReader(value))
+}
+
+// Delete removes an item from the disk cache.
+func (c *DiskCache) Delete(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	_ = os.Remove(c.keyPath(key))
+}
+
+func (c *DiskCache) janitor() {
+	ticker := time.NewTicker(c.cleanupInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		c.mu.Lock()
+		if c.defaultTTL > 0 {
+			now := time.Now()
+			entries, err := os.ReadDir(c.dir)
+			if err == nil {
+				for _, entry := range entries {
+					if entry.IsDir() || filepath.Ext(entry.Name()) != ".cache" {
+						continue
+					}
+					fullPath := filepath.Join(c.dir, entry.Name())
+					info, err := entry.Info()
+					if err == nil && now.Sub(info.ModTime()) > c.defaultTTL {
+						_ = os.Remove(fullPath)
+					}
+				}
 			}
 		}
 		c.mu.Unlock()
