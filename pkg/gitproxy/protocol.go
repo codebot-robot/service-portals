@@ -159,3 +159,83 @@ func parsePktLines(data []byte) []string {
 	}
 	return lines
 }
+
+// FetchRequest represents parsed parameters from a git-upload-pack fetch request.
+type FetchRequest struct {
+	Wants []string
+	Haves []string
+	IsV2  bool
+	Done  bool
+}
+
+// ParseFetchRequest parses wants, haves, and protocol version from a git-upload-pack request body.
+func ParseFetchRequest(body []byte) (*FetchRequest, error) {
+	req := &FetchRequest{}
+	lines := parsePktLines(body)
+
+	wantSet := make(map[string]bool)
+	haveSet := make(map[string]bool)
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "command=fetch" {
+			req.IsV2 = true
+		} else if strings.HasPrefix(trimmed, "want ") {
+			fields := strings.Fields(trimmed[5:])
+			if len(fields) > 0 {
+				oid := fields[0]
+				if !wantSet[oid] {
+					wantSet[oid] = true
+					req.Wants = append(req.Wants, oid)
+				}
+			}
+		} else if strings.HasPrefix(trimmed, "have ") {
+			fields := strings.Fields(trimmed[5:])
+			if len(fields) > 0 {
+				oid := fields[0]
+				if !haveSet[oid] {
+					haveSet[oid] = true
+					req.Haves = append(req.Haves, oid)
+				}
+			}
+		} else if trimmed == "done" {
+			req.Done = true
+		}
+	}
+
+	return req, nil
+}
+
+// BuildUpstreamFetchRequest constructs a git-upload-pack fetch request body for upstream.
+func BuildUpstreamFetchRequest(wants []string, haves []string, isV2 bool) []byte {
+	var buf bytes.Buffer
+	if isV2 {
+		writePktLineString(&buf, "command=fetch\n")
+		writePktLineString(&buf, "agent=gitproxy\n")
+		writeDelimPkt(&buf)
+		writePktLineString(&buf, "thin-pack\n")
+		writePktLineString(&buf, "ofs-delta\n")
+		for _, want := range wants {
+			writePktLineString(&buf, "want "+want+"\n")
+		}
+		for _, have := range haves {
+			writePktLineString(&buf, "have "+have+"\n")
+		}
+		writePktLineString(&buf, "done\n")
+		writeFlushPkt(&buf)
+	} else {
+		for i, want := range wants {
+			if i == 0 {
+				writePktLineString(&buf, "want "+want+" multi_ack_detailed side-band-64k ofs-delta\n")
+			} else {
+				writePktLineString(&buf, "want "+want+"\n")
+			}
+		}
+		writeFlushPkt(&buf)
+		for _, have := range haves {
+			writePktLineString(&buf, "have "+have+"\n")
+		}
+		writePktLineString(&buf, "done\n")
+	}
+	return buf.Bytes()
+}
