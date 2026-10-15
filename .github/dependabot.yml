@@ -14,25 +14,39 @@
 
 version: 2
 updates:
-  # Maintain Go dependencies and Go versions in go.mod
+  # Go modules
   - package-ecosystem: "gomod"
-    directory: "/"
+    directories:
+      - "/**"
     schedule:
       interval: "daily"
+    open-pull-requests-limit: 50
+    cooldown:
+      default-days: 7
     groups:
-      dependencies:
+      go-dependencies:
         patterns:
           - "*"
 
-  # Maintain Docker base image versions in all Dockerfiles recursively
+  # Docker base images
   - package-ecosystem: "docker"
     directories:
       - "/**"
     schedule:
-      interval: "weekly"
+      interval: "daily"
+    open-pull-requests-limit: 50
+    cooldown:
+      default-days: 7
+    groups:
+      docker-dependencies:
+        patterns:
+          - "*"
 
-  # Maintain GitHub Actions dependencies in workflows
+  # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
+    open-pull-requests-limit: 50
+    cooldown:
+      default-days: 7
