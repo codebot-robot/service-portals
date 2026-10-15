@@ -15,7 +15,6 @@
 package proxy
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -39,7 +38,7 @@ func TestOpenTelemetryProxy(t *testing.T) {
 	tp := sdktrace.NewTracerProvider()
 	otel.SetTracerProvider(tp)
 	defer func() {
-		_ = tp.Shutdown(context.Background())
+		_ = tp.Shutdown(t.Context())
 	}()
 
 	var capturedHeaders http.Header
@@ -61,7 +60,7 @@ func TestOpenTelemetryProxy(t *testing.T) {
 
 	// Create context with a valid span
 	tracer := otel.GetTracerProvider().Tracer("test-tracer")
-	ctx, span := tracer.Start(context.Background(), "test-span")
+	ctx, span := tracer.Start(t.Context(), "test-span")
 	defer span.End()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", ts.URL, nil)

@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 )
 
@@ -268,10 +269,14 @@ func ParsePackfileWithBase(data []byte, baseLookup func(oid string) *RawObject) 
 
 		decompressed := make([]byte, size)
 		if _, err := io.ReadFull(zr, decompressed); err != nil {
-			zr.Close()
+			if closeErr := zr.Close(); closeErr != nil {
+				log.Printf("failed to close zlib reader on decompress error: %v", closeErr)
+			}
 			return nil, fmt.Errorf("failed to decompress object data at offset %d (type %d, expected %d bytes): %w", entryOffset, objType, size, err)
 		}
-		zr.Close()
+		if err := zr.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close zlib reader at offset %d: %w", entryOffset, err)
+		}
 
 		pos += cbr.count
 		entry.decompressed = decompressed
@@ -513,8 +518,12 @@ func BuildPackfile(objects []*RawObject) ([]byte, error) {
 
 	// 12-byte header: "PACK", version 2, numObjects
 	buf.WriteString("PACK")
-	binary.Write(&buf, binary.BigEndian, uint32(2))
-	binary.Write(&buf, binary.BigEndian, uint32(len(objects)))
+	if err := binary.Write(&buf, binary.BigEndian, uint32(2)); err != nil {
+		return nil, fmt.Errorf("failed to write packfile version: %w", err)
+	}
+	if err := binary.Write(&buf, binary.BigEndian, uint32(len(objects))); err != nil {
+		return nil, fmt.Errorf("failed to write packfile object count: %w", err)
+	}
 
 	hasher := sha1.New()
 	hasher.Write(buf.Bytes())

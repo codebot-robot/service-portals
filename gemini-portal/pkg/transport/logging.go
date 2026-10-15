@@ -17,6 +17,7 @@ package transport
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -47,10 +48,15 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	if req.Body != nil {
 		bodyBytes, err := io.ReadAll(req.Body)
-		if err == nil {
-			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			logRequestBody(req, bodyBytes)
+		if err != nil {
+			log.Printf("Error reading request body: %v", err)
+			return nil, fmt.Errorf("reading request body for logging: %w", err)
 		}
+		if closeErr := req.Body.Close(); closeErr != nil {
+			log.Printf("Error closing request body: %v", closeErr)
+		}
+		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		logRequestBody(req, bodyBytes)
 	}
 
 	underlying := t.Underlying
@@ -84,10 +90,18 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		log.Printf("Bypassing body logging for gRPC streaming response.")
 	} else if resp.Body != nil {
 		bodyBytes, err := io.ReadAll(resp.Body)
-		if err == nil {
-			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			logResponseBody(resp, bodyBytes)
+		if err != nil {
+			log.Printf("Error reading response body: %v", err)
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				log.Printf("Error closing response body: %v", closeErr)
+			}
+			return nil, fmt.Errorf("reading response body for logging: %w", err)
 		}
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Error closing response body: %v", closeErr)
+		}
+		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		logResponseBody(resp, bodyBytes)
 	}
 
 	return resp, nil
@@ -111,7 +125,9 @@ func logRequestBody(req *http.Request, bodyBytes []byte) {
 			unmarshaler := &protojson.UnmarshalOptions{DiscardUnknown: true}
 			for _, cBytes := range payload.Contents {
 				var c generativelanguagepb.Content
-				if err := unmarshaler.Unmarshal(cBytes, &c); err == nil {
+				if err := unmarshaler.Unmarshal(cBytes, &c); err != nil {
+					log.Printf("Failed to unmarshal content: %v", err)
+				} else {
 					log.Printf("Parsed Request Message [%s]: %s", c.GetRole(), prototext.Format(&c))
 				}
 			}

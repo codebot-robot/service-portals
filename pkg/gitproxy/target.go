@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
 // ResolveUpstreamURL resolves the target upstream URL from an incoming HTTP request.
@@ -131,9 +133,7 @@ func isLikelyHostname(s string) bool {
 	if strings.HasSuffix(s, ".git") {
 		return false
 	}
-	if h, _, err := net.SplitHostPort(s); err == nil {
-		s = h
-	}
+	s = proxy.HostWithoutPort(s)
 	if net.ParseIP(s) != nil {
 		return true
 	}
@@ -151,9 +151,6 @@ func isLikelyHostname(s string) bool {
 }
 
 func isLocalHost(host string) bool {
-	h, _, err := net.SplitHostPort(host)
-	if err == nil {
-		host = h
-	}
+	host = proxy.HostWithoutPort(host)
 	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == ""
 }

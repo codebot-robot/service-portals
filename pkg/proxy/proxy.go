@@ -89,14 +89,22 @@ func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, 
 	return p, nil
 }
 
+// HostWithoutPort returns host with any trailing :port stripped.
+// If host does not contain a port or cannot be split, host is returned unchanged.
+func HostWithoutPort(host string) string {
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
+	}
+	return h
+}
+
 func (p *HTTPProxy) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	host := info.ServerName
 	if host == "" {
 		host = "localhost"
 	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host = HostWithoutPort(host)
 	return p.getCert(host)
 }
 
@@ -154,7 +162,11 @@ func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM 
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}()
 
 	// Remove hop-by-hop headers in response
 	removeHopByHopHeaders(resp.Header)
@@ -182,7 +194,10 @@ func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM 
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			w.Write(buf[:n])
+			if _, wErr := w.Write(buf[:n]); wErr != nil {
+				log.Printf("Error writing response body: %v", wErr)
+				return
+			}
 			if isFlusher {
 				flusher.Flush()
 			}
@@ -255,7 +270,9 @@ func (p *HTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	if err != nil {
-		clientConn.Close()
+		if closeErr := clientConn.Close(); closeErr != nil {
+			log.Printf("Error closing client connection: %v", closeErr)
+		}
 		return
 	}
 
@@ -267,7 +284,9 @@ func (p *HTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	cert, err := p.getCert(host)
 	if err != nil {
 		log.Printf("Failed to get cert for %s: %v", host, err)
-		clientConn.Close()
+		if closeErr := clientConn.Close(); closeErr != nil {
+			log.Printf("Error closing client connection: %v", closeErr)
+		}
 		return
 	}
 
@@ -278,7 +297,9 @@ func (p *HTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	tlsConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsConn.Handshake(); err != nil {
 		log.Printf("TLS handshake failed for %s: %v", host, err)
-		tlsConn.Close()
+		if closeErr := tlsConn.Close(); closeErr != nil {
+			log.Printf("Error closing TLS connection: %v", closeErr)
+		}
 		return
 	}
 
