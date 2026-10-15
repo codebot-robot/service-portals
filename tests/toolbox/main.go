@@ -125,12 +125,12 @@ func runMockGithub() {
 			headers[k] = v
 		}
 
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"login": "mock-github-user",
 			"id":    12345678,
 			"name":  "Mock GitHub User",
 			"bio":   "This is a mock GitHub server.",
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
@@ -159,13 +159,13 @@ func runMockGithub() {
 			repo = parts[1]
 		}
 
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"id":        987654321,
 			"name":      repo,
 			"full_name": owner + "/" + repo,
 			"private":   false,
 			"html_url":  "https://github.com/" + owner + "/" + repo,
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
@@ -186,9 +186,15 @@ func runMockGithub() {
 			headers[k] = v
 		}
 
-		fmt.Fprintf(w, "Keep it simple, stupid.\n\nRequest Headers:\n")
+		if _, err := fmt.Fprintf(w, "Keep it simple, stupid.\n\nRequest Headers:\n"); err != nil {
+			log.Printf("[mock-github] Failed to write response: %v", err)
+			return
+		}
 		for k, v := range headers {
-			fmt.Fprintf(w, "%s: %v\n", k, v)
+			if _, err := fmt.Fprintf(w, "%s: %v\n", k, v); err != nil {
+				log.Printf("[mock-github] Failed to write header: %v", err)
+				return
+			}
 		}
 	})
 
@@ -201,9 +207,9 @@ func runMockGithub() {
 			headers[k] = v
 		}
 
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"message": "Welcome to the Mock GitHub Server (Fallback endpoint)",
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
@@ -238,8 +244,8 @@ func runMockGemini() {
 			headers[k] = v
 		}
 
-		resp := map[string]interface{}{
-			"models": []map[string]interface{}{
+		resp := map[string]any{
+			"models": []map[string]any{
 				{
 					"name":        "models/gemini-1.5-pro",
 					"version":     "1.5-pro",
@@ -253,7 +259,7 @@ func runMockGemini() {
 					"description": "Mock Gemini 1.5 Flash",
 				},
 			},
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
@@ -274,11 +280,11 @@ func runMockGemini() {
 			headers[k] = v
 		}
 
-		resp := map[string]interface{}{
-			"candidates": []map[string]interface{}{
+		resp := map[string]any{
+			"candidates": []map[string]any{
 				{
-					"content": map[string]interface{}{
-						"parts": []map[string]interface{}{
+					"content": map[string]any{
+						"parts": []map[string]any{
 							{
 								"text": "Hello! This is a mock response from the Gemini API.",
 							},
@@ -288,7 +294,7 @@ func runMockGemini() {
 					"finishReason": "STOP",
 				},
 			},
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
@@ -309,15 +315,15 @@ func runMockGemini() {
 			headers[k] = v
 		}
 
-		resp := map[string]interface{}{
-			"models": []map[string]interface{}{
+		resp := map[string]any{
+			"models": []map[string]any{
 				{
 					"name":        "models/gemini-1.5-pro",
 					"version":     "1.5-pro",
 					"displayName": "Gemini 1.5 Pro",
 				},
 			},
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
@@ -338,11 +344,11 @@ func runMockGemini() {
 			headers[k] = v
 		}
 
-		resp := map[string]interface{}{
-			"candidates": []map[string]interface{}{
+		resp := map[string]any{
+			"candidates": []map[string]any{
 				{
-					"content": map[string]interface{}{
-						"parts": []map[string]interface{}{
+					"content": map[string]any{
+						"parts": []map[string]any{
 							{
 								"text": "Hello! This is a mock response from the Gemini API v1.",
 							},
@@ -352,7 +358,7 @@ func runMockGemini() {
 					"finishReason": "STOP",
 				},
 			},
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
@@ -373,9 +379,9 @@ func runMockGemini() {
 			headers[k] = v
 		}
 
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"message": "Welcome to the Mock Gemini Server (Fallback endpoint)",
-			"request_metadata": map[string]interface{}{
+			"request_metadata": map[string]any{
 				"headers": headers,
 				"method":  r.Method,
 				"path":    r.URL.Path,
