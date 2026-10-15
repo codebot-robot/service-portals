@@ -8,10 +8,11 @@
 
 | Feature | Transparent Sidecar Mode (Primary) | Explicit Service Mode | Explicit HTTP Proxy Mode |
 | :--- | :--- | :--- | :--- |
-| **Primary Binary** | `cmd/all-in-one-portal` + `cmd/init-service-portals` | `cmd/service-portal` (or service-specific portal) | `cmd/service-portal` / `cmd/all-in-one-portal` |
+| **Primary Binary** | `cmd/all-in-one-portal` + `cmd/init-service-portals` | `cmd/service-portal` (or service-specific portal) | `cmd/service-portal` |
 | **Application Changes** | **None** (talks to configured hostnames) | **URL change** (`http://gemini-portal/`) | **Env vars** (`HTTP_PROXY`, `HTTPS_PROXY`) |
-| **K8s Privileges** | Requires `NET_ADMIN` for init container | Standard unprivileged pod | Standard unprivileged pod |
+| **K8s Privileges** | Requires `NET_ADMIN` for init container | Standard unprivileged pod (requires cert-manager for `k8s/manifests.yaml`) | Standard unprivileged pod |
 | **TLS Handling** | Intercepts port 443 via pod-local CA | Plain HTTP in-cluster; HTTPS upstream | Intercepts `CONNECT` via pod-local CA |
+| **Routing / Upstream** | Multi-host routing via `PortalRule` | Single upstream via `TARGET_URL` | Single upstream via `TARGET_URL` (other hosts pass through unmodified) |
 | **Egress Enforcement** | **Strict packet-level blocking** of other ports | None at pod level (relies on NetworkPolicy) | None at pod level (relies on NetworkPolicy) |
 | **Secret Scope** | Scoped to individual pod | Shared across all pods accessing Service | Scoped to pod or shared |
 | **Bypass Resistance** | **High** (iptables drops direct traffic) | Low (workload can still talk externally) | Low (workload can bypass proxy env vars) |
@@ -86,7 +87,7 @@ In explicit service mode, the portal runs as a standalone Kubernetes Deployment 
 ```
 
 ### How it Works
-1. Deploy the portal using `k8s/manifests.yaml` (or the manifests in `gemini-portal/`, `anthropic-portal/`, or `github-portal/`).
+1. Deploy the portal using `k8s/manifests.yaml` (or the manifests in `gemini-portal/`, `anthropic-portal/`, or `github-portal/`). Note that `k8s/manifests.yaml` includes cert-manager `Issuer` and `Certificate` resources to provision the `service-portal-ca` secret, so [cert-manager](https://cert-manager.io/) must be installed in the cluster.
 2. The portal container runs with environment variables `TARGET_URL` (e.g. `https://generativelanguage.googleapis.com`) and `UPSTREAM_AUTH_TOKEN` (sourced from a Kubernetes Secret).
 3. Workload pods address the portal directly over internal cluster DNS:
    ```bash
@@ -102,7 +103,9 @@ In explicit service mode, the portal runs as a standalone Kubernetes Deployment 
 
 ## 3. Explicit HTTP Proxy Mode (`HTTP_PROXY` / `HTTPS_PROXY`)
 
-In explicit HTTP proxy mode, workloads configure standard proxy environment variables to route their HTTP and HTTPS traffic through the portal.
+In explicit HTTP proxy mode, workloads configure standard proxy environment variables to route their HTTP and HTTPS traffic through the portal (`cmd/service-portal`).
+
+> **Scope & Limitations**: This mode supports a single upstream configured by `TARGET_URL` and `UPSTREAM_AUTH_TOKEN`. Requests to other hosts are forwarded without modification; `PortalRule` declarative multi-host routing is not applied in this mode today (see follow-up issue [#127](https://github.com/gke-labs/service-portals/issues/127)).
 
 ```
 +-------------------------------------------------------+
@@ -117,18 +120,19 @@ In explicit HTTP proxy mode, workloads configure standard proxy environment vari
                             | HTTP CONNECT api.github.com:443
                             v
 +-------------------------------------------------------+
-| Portal Proxy (cmd/service-portal or all-in-one-portal)|
+| Portal Proxy (cmd/service-portal)                     |
 |                                                       |
 | 1. Accepts CONNECT tunnel                             |
 | 2. Mints TLS cert for api.github.com using local CA   |
 | 3. Terminates TLS tunnel and inspects request         |
-| 4. Injects secret auth header                         |
+| 4. If host matches TARGET_URL, injects auth header;   |
+|    otherwise forwards untouched (no credential swap). |
 | 5. Forwards to upstream https://api.github.com        |
 +-------------------------------------------------------+
 ```
 
 ### How it Works
-1. Deploy the portal either as a sidecar or as an in-cluster service with `CA_CERT_PATH` and `CA_KEY_PATH` configured.
+1. Deploy `cmd/service-portal` either as a sidecar or as an in-cluster service with `TARGET_URL`, `UPSTREAM_AUTH_TOKEN`, `CA_CERT_PATH`, and `CA_KEY_PATH` configured.
 2. In the workload container, set:
    ```bash
    export HTTP_PROXY=http://127.0.0.1:8080
@@ -136,7 +140,11 @@ In explicit HTTP proxy mode, workloads configure standard proxy environment vari
    export SSL_CERT_FILE=/etc/service-portal/ca/tls.crt # or trust the CA
    ```
 3. For HTTPS connections, standard HTTP client libraries issue an `HTTP CONNECT <host>:443` request to the proxy.
-4. `pkg/proxy/proxy.go` intercepts the `CONNECT` request, hijacks the connection, completes the TLS handshake using a dynamically minted certificate signed by the CA, and executes credential injection before proxying to the target host.
+4. `pkg/proxy/proxy.go` intercepts the `CONNECT` request, hijacks the connection, completes the TLS handshake using a dynamically minted certificate signed by the CA, and inspects the decrypted request:
+   - If the tunnelled host matches `TARGET_URL.Host`, it injects `UPSTREAM_AUTH_TOKEN` into `UPSTREAM_AUTH_HEADER` (e.g. `Authorization: Bearer ...`) and proxies to `TARGET_URL`.
+   - If the host is any other external host, the request is forwarded to `https://<host>` without modification or credential injection (as tested in `TestConnectHonorsHost/OtherHost`).
+   - Similarly, for cleartext HTTP requests sent with absolute URLs (standard `HTTP_PROXY`), requests are forwarded directly to the requested host without credential injection unless the host matches `TARGET_URL.Host`.
+   - Note: Declarative `PortalRule` multi-host routing is not evaluated in this mode; multi-service routing requires transparent sidecar mode.
 
 ### Best Used For
-- Workloads using standard CLI utilities (`git`, `curl`, `pip`, `npm`) that natively respect `HTTP_PROXY` and `HTTPS_PROXY` in environments where `CAP_NET_ADMIN` (required for transparent iptables interception) cannot be granted.
+- Workloads calling a specific external API using standard CLI utilities (`git`, `curl`, `pip`, `npm`) that natively respect `HTTP_PROXY` and `HTTPS_PROXY` in environments where `CAP_NET_ADMIN` (required for transparent iptables interception) cannot be granted.

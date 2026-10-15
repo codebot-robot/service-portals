@@ -10,7 +10,7 @@ Service Portals is a credential-swapping, layer-7 intercepting proxy for sandbox
 
 1. **Transparent Sidecar Mode (Primary)**: Uses `init-service-portals` to configure iptables redirection and an ephemeral Root CA, while `all-in-one-portal` intercepts HTTP (:8080) and HTTPS (:8443) traffic, minting dynamic TLS certificates and injecting credentials defined in `PortalRule` YAML files (`k8s/sidecar.yaml`).
 2. **Explicit Service Mode**: A cluster-level reverse proxy (`k8s/manifests.yaml`) that forwards requests to configured upstream targets.
-3. **Explicit HTTP Proxy Mode**: Handles standard `HTTP_PROXY` and `HTTPS_PROXY` (CONNECT tunnels) with TLS interception.
+3. **Explicit HTTP Proxy Mode**: Handles standard `HTTP_PROXY` and `HTTPS_PROXY` (CONNECT tunnels) with TLS interception for a single upstream configured by `TARGET_URL` / `UPSTREAM_AUTH_TOKEN` (other hosts are forwarded without modification; `PortalRule` routing does not apply).
 
 ## Documentation Index
 

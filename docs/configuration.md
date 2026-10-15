@@ -87,7 +87,7 @@ These variables configure the HTTP/HTTPS proxy servers.
 | Variable / Flag | Default | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | Port to listen on for standard HTTP requests and transparently redirected port 80 traffic. |
-| `HTTPS_PORT` | `8443` | Port to listen on for TLS connections and transparently redirected port 443 traffic. Only started if `CA_CERT_PATH` and `CA_KEY_PATH` are configured and a CertificateProvider is present. |
+| `HTTPS_PORT` | `8443` | Port to listen on for TLS connections and transparently redirected port 443 traffic. Always started; if `CA_CERT_PATH` and `CA_KEY_PATH` are not configured, the listener is active but incoming TLS handshakes fail with a certificate signing error. |
 | `RULES_DIR` / `--rules-dir` | `""` | Directory containing `PortalRule` YAML files. The `--rules-dir` flag takes precedence over the environment variable. |
 | `TARGET_URL` | *See below* | Fallback / default target URL. Defaults: <br>• `service-portal` & `all-in-one-portal`: `https://generativelanguage.googleapis.com`<br>• `gemini-portal`: `https://generativelanguage.googleapis.com`<br>• `anthropic-portal`: `https://api.anthropic.com`<br>• `github-portal`: `https://api.github.com/` |
 | `UPSTREAM_AUTH_TOKEN` | `""` | Default token injected into requests when falling through to `TARGET_URL`. |

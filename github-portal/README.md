@@ -21,7 +21,7 @@
 | `UPSTREAM_AUTH_TOKEN` | `""` | GitHub token injected into upstream requests. |
 | `UPSTREAM_AUTH_HEADER` | `Authorization` | Header name for injecting the token. |
 | `PORT` | `8080` | Port to listen on. |
-| `HTTPS_PORT` | `8443` | HTTPS port for TLS connections when CA keys are provided. |
+| `HTTPS_PORT` | `8443` | HTTPS port for TLS connections (requires `CA_CERT_PATH` and `CA_KEY_PATH` to sign certificates). |
 | `CA_CERT_PATH` | `""` | Path to Root CA certificate PEM file. |
 | `CA_KEY_PATH` | `""` | Path to Root CA private key PEM file. |
 | `OTEL_INSTRUMENTATION_ENABLED` | `""` | Set to `"true"` to enable OpenTelemetry tracing. |

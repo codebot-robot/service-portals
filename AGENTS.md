@@ -14,7 +14,7 @@
 
 ### Applications (`cmd/` and service directories)
 - **`cmd/all-in-one-portal/`**: The primary sidecar proxy binary. Uses `pkg/portals` to load `PortalRule` secrets from `--rules-dir`, listening on `:8080` (HTTP) and `:8443` (HTTPS) with SNI-based dynamic TLS minting.
-- **`cmd/init-service-portals/`**: Setup binary for the pod `initContainer`. Generates ephemeral pod-local 2048-bit RSA Root CA key pairs, writes public certs to `/etc/service-portal/ca`, writes private keys to `/etc/service-portal/ca-private`, and executes `entrypoint.sh` for iptables redirection and egress filtering.
+- **`cmd/init-service-portals/`**: Setup binary for the pod `initContainer`. Generates ephemeral pod-local 2048-bit RSA Root CA key pairs, writes public certs to `/etc/service-portal/ca`, and writes private keys to `/etc/service-portal/ca-private`; executed by `entrypoint.sh` before it sets up iptables redirection and egress filtering.
 - **`cmd/gitproxy-server/`**: Standalone caching Git proxy binary supporting disk/memory caches and upstream token injection.
 - **`cmd/service-portal/`**: Single-target reverse proxy and HTTP proxy binary.
 - **`gemini-portal/`**: Specialized portal for Google Gemini API (`generativelanguage.googleapis.com`) with JSON and gRPC protobuf request/response payload parsing and logging.

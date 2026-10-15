@@ -19,7 +19,7 @@
 | Environment Variable / Flag | Default | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | Port to listen on. |
-| `HTTPS_PORT` | `8443` | Port for TLS connections when CA keys are provided. |
+| `HTTPS_PORT` | `8443` | Port for TLS connections (requires `CA_CERT_PATH` and `CA_KEY_PATH` to sign certificates). |
 | `TARGET_URL` | `https://generativelanguage.googleapis.com` | Target upstream URL. |
 | `UPSTREAM_AUTH_TOKEN` | `""` | Authentication token injected into upstream requests. |
 | `UPSTREAM_AUTH_HEADER` | `Authorization` | Header used for injecting the authentication token. |

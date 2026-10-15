@@ -81,7 +81,7 @@ Placing an intercepting proxy in the outbound traffic path provides powerful cap
 | :--- | :--- | :--- |
 | **Transparent Sidecar Mode** *(Primary)* | `init-service-portals` configures iptables redirection and a pod-local CA; `all-in-one-portal` intercepts HTTP (:8080) and HTTPS (:8443) traffic. Requires zero application code changes and provides strict packet-level egress filtering. | [Sidecar Guide](docs/sidecar-container.md) |
 | **Explicit Service Mode** | Centralized, cluster-wide reverse proxy exposed via a standard Kubernetes `Service`. Workloads address the proxy explicitly (e.g. `http://gemini-portal/`). Does not require `NET_ADMIN`. | [Deployment Modes](docs/deployment-modes.md#2-explicit-service-mode-shared-in-cluster-gateway) |
-| **Explicit HTTP Proxy Mode** | Standard `HTTP_PROXY` and `HTTPS_PROXY` tunneling (`CONNECT` method). The proxy intercepts the tunnel and injects credentials for supported tools (`git`, `curl`, SDKs). | [Deployment Modes](docs/deployment-modes.md#3-explicit-http-proxy-mode-httpproxy--httpsproxy) |
+| **Explicit HTTP Proxy Mode** | Standard `HTTP_PROXY` and `HTTPS_PROXY` tunneling (`CONNECT` method). Supports a single upstream configured by `TARGET_URL` / `UPSTREAM_AUTH_TOKEN`; requests to other hosts are forwarded without modification; `PortalRule` routing is not applied in this mode today (see [#127](https://github.com/gke-labs/service-portals/issues/127)). | [Deployment Modes](docs/deployment-modes.md#3-explicit-http-proxy-mode-httpproxy--httpsproxy) |
 
 For a detailed architectural comparison and trade-offs, see [docs/deployment-modes.md](docs/deployment-modes.md).
 
