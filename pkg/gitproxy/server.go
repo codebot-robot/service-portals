@@ -287,9 +287,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// If upstream request was modified with extra haves, generate client response from repo store
 			if !bytes.Equal(upstreamReqBody, reqBody) {
-				if err := s.serveFetchFromStore(w, repoStore, reqBody); err != nil {
+				clientRespBytes, err := buildFetchFromStore(repoStore, reqBody)
+				if err != nil {
 					log.Printf("Failed to serve cache-assisted fetch for %s: %v", targetURL.Path, err)
 					http.Error(w, "cache-assisted fetch failed", http.StatusBadGateway)
+					return
+				}
+				w.Header().Del("Content-Length")
+				w.WriteHeader(http.StatusOK)
+				if _, err := w.Write(clientRespBytes); err != nil {
+					log.Printf("Failed to write cache-assisted fetch response for %s: %v", targetURL.Path, err)
 				}
 				return
 			}
@@ -341,35 +348,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Proxied %s %s -> %s [%s]", r.Method, r.URL.Path, resp.Status, targetURL.String())
 }
 
-func (s *Server) serveFetchFromStore(w http.ResponseWriter, repoStore *RepoStore, reqBody []byte) error {
+func buildFetchFromStore(repoStore *RepoStore, reqBody []byte) ([]byte, error) {
+	if repoStore == nil {
+		return nil, fmt.Errorf("repo store is nil")
+	}
 	fetchReq, err := ParseFetchRequest(reqBody)
 	if err != nil {
-		return fmt.Errorf("parsing fetch request: %w", err)
+		return nil, fmt.Errorf("parsing fetch request: %w", err)
 	}
 	if fetchReq == nil || len(fetchReq.Wants) == 0 {
-		return fmt.Errorf("no wants in fetch request")
+		return nil, fmt.Errorf("no wants in fetch request")
 	}
 	if !repoStore.HasAllCommits(fetchReq.Wants) {
-		return fmt.Errorf("repo store missing wanted commits")
+		return nil, fmt.Errorf("repo store missing wanted commits")
 	}
 	objects, acks, err := repoStore.CollectObjectsForCommits(fetchReq.Wants, fetchReq.Haves)
 	if err != nil {
-		return fmt.Errorf("collecting objects from cache: %w", err)
+		return nil, fmt.Errorf("collecting objects from cache: %w", err)
 	}
 	if len(objects) == 0 {
-		return fmt.Errorf("no objects collected for commits")
+		return nil, fmt.Errorf("no objects collected for commits")
 	}
 	packfile, err := BuildPackfile(objects)
 	if err != nil {
-		return fmt.Errorf("building packfile from cache: %w", err)
+		return nil, fmt.Errorf("building packfile from cache: %w", err)
 	}
 	clientRespBytes := FormatSidebandPackfile(packfile, fetchReq.IsV2, acks, len(fetchReq.Haves) > 0)
-	w.Header().Del("Content-Length")
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(clientRespBytes); err != nil {
-		return fmt.Errorf("writing packfile response: %w", err)
-	}
-	return nil
+	return clientRespBytes, nil
 }
 
 func removeHopByHopHeaders(h http.Header) {

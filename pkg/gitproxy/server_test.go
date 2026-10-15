@@ -16,6 +16,7 @@ package gitproxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -173,7 +174,7 @@ func TestGitProxyModifiedFetchFailureReturns502(t *testing.T) {
 
 	// Since upstreamReqBody was augmented with have 1111..., upstream pack is thin and client response
 	// must come from store. But store doesn't have wantCommit (upstream returned dummy data that wasn't a valid pack),
-	// so serveFetchFromStore must fail, returning 502 Bad Gateway.
+	// so buildFetchFromStore must fail, returning 502 Bad Gateway.
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected status 502 Bad Gateway, got %d (body: %s)", w.Code, w.Body.String())
 	}
@@ -183,6 +184,144 @@ func TestGitProxyModifiedFetchFailureReturns502(t *testing.T) {
 	key := s.computeCacheKey(req, targetURL, fetchBody)
 	if _, ok := c.Get(key); ok {
 		t.Errorf("expected nothing cached for failed fetch, but found cached entry")
+	}
+}
+
+type failingResponseWriter struct {
+	http.ResponseWriter
+	headerCalls []int
+	writeErr    error
+}
+
+func (f *failingResponseWriter) WriteHeader(code int) {
+	f.headerCalls = append(f.headerCalls, code)
+	f.ResponseWriter.WriteHeader(code)
+}
+
+func (f *failingResponseWriter) Write(b []byte) (int, error) {
+	return 0, f.writeErr
+}
+
+func TestGitProxyModifiedFetchWriteFailureDoesNotCallHttpError(t *testing.T) {
+	// Build a valid packfile containing wantCommit to be returned by backend
+	wantCommitData := []byte("tree 4444444444444444444444444444444444444444\nauthor Alice <a@example.com> 1700000000 +0000\ncommitter Alice <a@example.com> 1700000000 +0000\n\nCommit\n")
+	wantCommitOID := ComputeOID(ObjCommit, wantCommitData)
+	commitObj := &RawObject{Type: ObjCommit, Data: wantCommitData, OID: wantCommitOID}
+	backendPack, err := BuildPackfile([]*RawObject{commitObj})
+	if err != nil {
+		t.Fatalf("BuildPackfile failed: %v", err)
+	}
+
+	// Backend returns 200 OK with the packfile
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(backendPack)
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	c := cache.NewInMemoryCache(1 * time.Minute)
+	repoCache := NewRepoCacheManager("")
+	s := NewServer(Config{
+		DefaultTargetURL: backend.URL,
+		Cache:            c,
+		CacheTTL:         10 * time.Minute,
+		Transport:        backend.Client().Transport,
+	})
+	s.RepoCache = repoCache
+
+	repoPath := "/repo.git/git-upload-pack"
+	repoStore := repoCache.GetRepoStore(repoPath)
+
+	// Pre-seed repoStore with a known commit so that upstream request will be augmented with extra haves
+	knownCommit := "1111111111111111111111111111111111111111"
+	repoStore.commits[knownCommit] = &CommitInfo{
+		OID:     knownCommit,
+		Tree:    "3333333333333333333333333333333333333333",
+		Parents: nil,
+	}
+
+	fetchBody := []byte(fmt.Sprintf("0032want %s\n00000009done\n", wantCommitOID))
+
+	req := httptest.NewRequest("POST", fmt.Sprintf("/%s%s", u.Host, repoPath), bytes.NewReader(fetchBody))
+	rec := httptest.NewRecorder()
+	fw := &failingResponseWriter{
+		ResponseWriter: rec,
+		writeErr:       errors.New("client connection disconnected"),
+	}
+
+	s.ServeHTTP(fw, req)
+
+	// Verify WriteHeader was called exactly once with 200 OK, and never with 502 Bad Gateway
+	if len(fw.headerCalls) != 1 {
+		t.Fatalf("expected WriteHeader to be called exactly once, got %d calls: %v", len(fw.headerCalls), fw.headerCalls)
+	}
+	if fw.headerCalls[0] != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d", fw.headerCalls[0])
+	}
+}
+
+func TestBuildFetchFromStore(t *testing.T) {
+	store := NewRepoStore("")
+
+	// 1. Nil store
+	if _, err := buildFetchFromStore(nil, []byte("invalid")); err == nil {
+		t.Error("expected error for nil store")
+	}
+
+	// 2. Invalid fetch request body
+	if _, err := buildFetchFromStore(store, []byte("invalid-body")); err == nil {
+		t.Error("expected error for invalid fetch request body")
+	}
+
+	// 3. No wants in request
+	emptyBody := []byte("0000")
+	if _, err := buildFetchFromStore(store, emptyBody); err == nil {
+		t.Error("expected error for fetch request with no wants")
+	}
+
+	// 4. Missing wanted commit in store
+	commitData := []byte("tree 4444444444444444444444444444444444444444\nauthor Alice <a@example.com> 1700000000 +0000\ncommitter Alice <a@example.com> 1700000000 +0000\n\nCommit\n")
+	wantCommit := ComputeOID(ObjCommit, commitData)
+	fetchBody := []byte(fmt.Sprintf("0032want %s\n00000009done\n", wantCommit))
+	if _, err := buildFetchFromStore(store, fetchBody); err == nil {
+		t.Error("expected error when commit missing from store")
+	}
+
+	// 5. Commit present but no objects collected
+	store.commits[wantCommit] = &CommitInfo{OID: wantCommit}
+	if _, err := buildFetchFromStore(store, fetchBody); err == nil {
+		t.Error("expected error when no objects collected for commit")
+	}
+
+	// 6. Success: valid commit and objects in store
+	store.objects[wantCommit] = &RawObject{
+		Type: ObjCommit,
+		OID:  wantCommit,
+		Data: commitData,
+	}
+	store.commitObjects[wantCommit] = []string{wantCommit}
+
+	resp, err := buildFetchFromStore(store, fetchBody)
+	if err != nil {
+		t.Fatalf("expected buildFetchFromStore to succeed, got %v", err)
+	}
+	if len(resp) == 0 {
+		t.Fatal("expected non-empty response bytes")
+	}
+
+	// Verify that the extracted packfile from response contains our object
+	packBytes, err := ExtractPackfileFromResponse(resp)
+	if err != nil {
+		t.Fatalf("failed to extract packfile from response: %v", err)
+	}
+	parsedObjs, err := ParsePackfile(packBytes)
+	if err != nil {
+		t.Fatalf("failed to parse extracted packfile: %v", err)
+	}
+	if len(parsedObjs) != 1 || parsedObjs[0].OID != wantCommit {
+		t.Fatalf("unexpected parsed objects: %+v (want OID %s)", parsedObjs, wantCommit)
 	}
 }
 
