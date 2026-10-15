@@ -3,6 +3,10 @@
 > **A credential-swapping, layer-7 intercepting proxy for sandboxes.**<br>
 > Keep real credentials out of untrusted workloads—because *tokens that aren't there can't leak.*
 
+We welcome contributions! Please see [docs/contributing.md](docs/contributing.md) for more information.
+
+We follow [Google's Open Source Community Guidelines](https://opensource.google.com/conduct/).
+
 ---
 
 ## What is Service Portals?
