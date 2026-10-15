@@ -88,7 +88,9 @@ func (c *CachingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		return resp, err
 	}
-	resp.Body.Close()
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		log.Printf("Error closing response body: %v", closeErr)
+	}
 
 	// Reconstruct response body for returning
 	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))

@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -152,7 +153,11 @@ func (c *DiskCache) Open(key string) (io.ReadSeekCloser, error) {
 	}
 
 	if c.defaultTTL > 0 && time.Since(info.ModTime()) > c.defaultTTL {
-		go os.Remove(p)
+		go func() {
+			if err := os.Remove(p); err != nil {
+				log.Printf("warning: removing expired cache file %s: %v", p, err)
+			}
+		}()
 		return nil, os.ErrNotExist
 	}
 
@@ -161,7 +166,9 @@ func (c *DiskCache) Open(key string) (io.ReadSeekCloser, error) {
 	// file access times. Updating mtime ensures our TTL/LRU expiration check reliably sees
 	// when the file was last accessed.
 	now := time.Now()
-	_ = os.Chtimes(p, now, now)
+	if err := os.Chtimes(p, now, now); err != nil {
+		log.Printf("cache: failed to update access time for %s: %v", p, err)
+	}
 
 	f, err := os.Open(p)
 	if err != nil {
@@ -177,7 +184,11 @@ func (c *DiskCache) Get(key string) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	defer r.Close()
+	defer func() {
+		if err := r.Close(); err != nil {
+			log.Printf("cache: failed to close reader for %s: %v", key, err)
+		}
+	}()
 
 	val, err := io.ReadAll(r)
 	if err != nil {
@@ -199,19 +210,27 @@ func (c *DiskCache) Put(key string, r io.Reader) error {
 	tmpName := tmpFile.Name()
 
 	if _, err := io.Copy(tmpFile, r); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpName)
+		if err := tmpFile.Close(); err != nil {
+			log.Printf("cache: failed to close temp file %s: %v", tmpName, err)
+		}
+		if err := os.Remove(tmpName); err != nil {
+			log.Printf("cache: failed to remove temp file %s: %v", tmpName, err)
+		}
 		return err
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpName)
+		if remErr := os.Remove(tmpName); remErr != nil {
+			log.Printf("cache: failed to remove temp file %s: %v", tmpName, remErr)
+		}
 		return err
 	}
 
 	p := c.keyPath(key)
 	now := time.Now()
-	_ = os.Chtimes(tmpName, now, now)
+	if err := os.Chtimes(tmpName, now, now); err != nil {
+		log.Printf("cache: failed to touch temp file %s: %v", tmpName, err)
+	}
 
 	return os.Rename(tmpName, p)
 }
@@ -221,7 +240,9 @@ func (c *DiskCache) Set(key string, value []byte, ttl time.Duration) {
 	if ttl > 0 && c.defaultTTL <= 0 {
 		c.defaultTTL = ttl
 	}
-	_ = c.Put(key, bytes.NewReader(value))
+	if err := c.Put(key, bytes.NewReader(value)); err != nil {
+		log.Printf("cache: failed to store %s: %v", key, err)
+	}
 }
 
 // Delete removes an item from the disk cache.
@@ -229,7 +250,9 @@ func (c *DiskCache) Delete(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	_ = os.Remove(c.keyPath(key))
+	if err := os.Remove(c.keyPath(key)); err != nil && !os.IsNotExist(err) {
+		log.Printf("cache: failed to remove %s: %v", key, err)
+	}
 }
 
 func (c *DiskCache) janitor() {
@@ -241,15 +264,23 @@ func (c *DiskCache) janitor() {
 		if c.defaultTTL > 0 {
 			now := time.Now()
 			entries, err := os.ReadDir(c.dir)
-			if err == nil {
+			if err != nil {
+				log.Printf("cache: janitor failed to read directory %s: %v", c.dir, err)
+			} else {
 				for _, entry := range entries {
 					if entry.IsDir() || filepath.Ext(entry.Name()) != ".cache" {
 						continue
 					}
 					fullPath := filepath.Join(c.dir, entry.Name())
 					info, err := entry.Info()
-					if err == nil && now.Sub(info.ModTime()) > c.defaultTTL {
-						_ = os.Remove(fullPath)
+					if err != nil {
+						log.Printf("cache: janitor failed to stat %s: %v", fullPath, err)
+						continue
+					}
+					if now.Sub(info.ModTime()) > c.defaultTTL {
+						if err := os.Remove(fullPath); err != nil {
+							log.Printf("cache: janitor failed to remove expired file %s: %v", fullPath, err)
+						}
 					}
 				}
 			}

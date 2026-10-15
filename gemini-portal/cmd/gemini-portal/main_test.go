@@ -111,7 +111,7 @@ func TestGRPCForwarding(t *testing.T) {
 	client := generativelanguagepb.NewGenerativeServiceClient(conn)
 
 	// Test non-streaming call
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	resp, err := client.GenerateContent(ctx, &generativelanguagepb.GenerateContentRequest{})
 	if err != nil {
@@ -122,7 +122,7 @@ func TestGRPCForwarding(t *testing.T) {
 	}
 
 	// Test streaming call
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx2, cancel2 := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel2()
 	stream, err := client.StreamGenerateContent(ctx2, &generativelanguagepb.GenerateContentRequest{})
 	if err != nil {

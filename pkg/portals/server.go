@@ -84,21 +84,21 @@ func Run(ctx context.Context, config Config) error {
 	var c *cache.InMemoryCache
 	cacheTTL := config.CacheTTL
 	if cacheTTLEnv := os.Getenv("CACHE_TTL"); cacheTTLEnv != "" {
-		if d, err := time.ParseDuration(cacheTTLEnv); err == nil {
-			cacheTTL = d
-		} else {
-			log.Printf("Warning: invalid CACHE_TTL %q: %v", cacheTTLEnv, err)
+		d, err := time.ParseDuration(cacheTTLEnv)
+		if err != nil {
+			return fmt.Errorf("invalid CACHE_TTL %q: %w", cacheTTLEnv, err)
 		}
+		cacheTTL = d
 	}
 
 	if cacheTTL > 0 {
 		cleanupInterval := 1 * time.Minute
 		if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
-			if d, err := time.ParseDuration(cleanupEnv); err == nil {
-				cleanupInterval = d
-			} else {
-				log.Printf("Warning: invalid CACHE_CLEANUP_INTERVAL %q: %v", cleanupEnv, err)
+			d, err := time.ParseDuration(cleanupEnv)
+			if err != nil {
+				return fmt.Errorf("invalid CACHE_CLEANUP_INTERVAL %q: %w", cleanupEnv, err)
 			}
+			cleanupInterval = d
 		}
 
 		c = cache.NewInMemoryCache(cleanupInterval)

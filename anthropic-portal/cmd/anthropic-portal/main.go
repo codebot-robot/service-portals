@@ -71,24 +71,29 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	if req.Body != nil {
 		bodyBytes, err := io.ReadAll(req.Body)
-		if err == nil {
-			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		if err != nil {
+			log.Printf("Error reading request body: %v", err)
+			return nil, fmt.Errorf("reading request body for logging: %w", err)
+		}
+		if closeErr := req.Body.Close(); closeErr != nil {
+			log.Printf("Error closing request body: %v", closeErr)
+		}
+		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-			var payload struct {
-				Messages []struct {
-					Role    string      `json:"role"`
-					Content interface{} `json:"content"`
-				} `json:"messages"`
-				System interface{} `json:"system"`
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content any    `json:"content"`
+			} `json:"messages"`
+			System any `json:"system"`
+		}
+		if err := json.Unmarshal(bodyBytes, &payload); err == nil && len(payload.Messages) > 0 {
+			log.Printf("Parsed Request System Prompt: %v", payload.System)
+			for _, m := range payload.Messages {
+				log.Printf("Parsed Request Message [%s]: %v", m.Role, m.Content)
 			}
-			if err := json.Unmarshal(bodyBytes, &payload); err == nil && len(payload.Messages) > 0 {
-				log.Printf("Parsed Request System Prompt: %v", payload.System)
-				for _, m := range payload.Messages {
-					log.Printf("Parsed Request Message [%s]: %v", m.Role, m.Content)
-				}
-			} else {
-				log.Printf("Request Body: %s", string(bodyBytes))
-			}
+		} else {
+			log.Printf("Request Body: %s", string(bodyBytes))
 		}
 	}
 
@@ -107,35 +112,49 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	if resp.Body != nil {
 		bodyBytes, err := io.ReadAll(resp.Body)
-		if err == nil {
-			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-			uncompressedBytes := bodyBytes
-			if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-				gr, err := gzip.NewReader(bytes.NewReader(bodyBytes))
-				if err == nil {
-					if b, err := io.ReadAll(gr); err == nil {
-						uncompressedBytes = b
-					}
-					gr.Close()
-				}
+		if err != nil {
+			log.Printf("Error reading response body: %v", err)
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				log.Printf("Error closing response body: %v", closeErr)
 			}
+			return nil, fmt.Errorf("reading response body for logging: %w", err)
+		}
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Error closing response body: %v", closeErr)
+		}
+		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-			var payload struct {
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-			}
-			if err := json.Unmarshal(uncompressedBytes, &payload); err == nil && len(payload.Content) > 0 {
-				for _, c := range payload.Content {
-					if c.Type == "text" {
-						log.Printf("Parsed Response Content [text]: %s", c.Text)
-					}
-				}
+		uncompressedBytes := bodyBytes
+		if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+			gr, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+			if err != nil {
+				log.Printf("Error creating gzip reader: %v", err)
 			} else {
-				log.Printf("Response Body: %s", string(uncompressedBytes))
+				if b, err := io.ReadAll(gr); err != nil {
+					log.Printf("Error reading gzip body: %v", err)
+				} else {
+					uncompressedBytes = b
+				}
+				if err := gr.Close(); err != nil {
+					log.Printf("Error closing gzip reader: %v", err)
+				}
 			}
+		}
+
+		var payload struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(uncompressedBytes, &payload); err == nil && len(payload.Content) > 0 {
+			for _, c := range payload.Content {
+				if c.Type == "text" {
+					log.Printf("Parsed Response Content [text]: %s", c.Text)
+				}
+			}
+		} else {
+			log.Printf("Response Body: %s", string(uncompressedBytes))
 		}
 	}
 

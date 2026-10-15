@@ -57,9 +57,14 @@ func runServer() {
 			headers[k] = v
 		}
 
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Failed to read body: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"headers": headers,
 			"body":    string(body),
 			"method":  r.Method,
@@ -83,7 +88,11 @@ func runClient(targetURL string) {
 	if err != nil {
 		log.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Failed to close response body: %v", err)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

@@ -74,9 +74,11 @@ func run(ctx context.Context, args []string) error {
 	cacheTTL := *cacheTTLFlag
 	if cacheTTL <= 0 {
 		if ttlEnv := os.Getenv("CACHE_TTL"); ttlEnv != "" {
-			if d, err := time.ParseDuration(ttlEnv); err == nil {
-				cacheTTL = d
+			d, err := time.ParseDuration(ttlEnv)
+			if err != nil {
+				return fmt.Errorf("parsing CACHE_TTL: %w", err)
 			}
+			cacheTTL = d
 		}
 	}
 	if cacheTTL <= 0 {
@@ -86,9 +88,11 @@ func run(ctx context.Context, args []string) error {
 	cleanupInterval := *cleanupIntervalFlag
 	if cleanupInterval <= 0 {
 		if intervalEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); intervalEnv != "" {
-			if d, err := time.ParseDuration(intervalEnv); err == nil {
-				cleanupInterval = d
+			d, err := time.ParseDuration(intervalEnv)
+			if err != nil {
+				return fmt.Errorf("parsing CACHE_CLEANUP_INTERVAL: %w", err)
 			}
+			cleanupInterval = d
 		}
 	}
 	if cleanupInterval <= 0 {

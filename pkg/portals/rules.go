@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -215,9 +214,7 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Strip port if present, safe for IPv6
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host = proxy.HostWithoutPort(host)
 	host = strings.ToLower(host)
 
 	rr.mu.RLock()
@@ -246,9 +243,7 @@ func (rr *RuleRouter) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificat
 	if host == "" {
 		host = "localhost"
 	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host = proxy.HostWithoutPort(host)
 	host = strings.ToLower(host)
 
 	rr.mu.RLock()
