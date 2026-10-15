@@ -110,9 +110,11 @@ func (s *RepoStore) IngestPackfile(packData []byte) ([]string, error) {
 
 		if obj.Type == ObjTree {
 			childOIDs, err := ParseTreeEntries(obj.Data)
-			if err == nil {
-				s.treeEntries[obj.OID] = childOIDs
+			if err != nil {
+				// Abort ingestion: an incomplete tree graph could lead HasAllCommits to lie and BuildPackfile to serve partial packs.
+				return nil, fmt.Errorf("failed to parse tree entries for %s: %w", obj.OID, err)
 			}
+			s.treeEntries[obj.OID] = childOIDs
 		} else if obj.Type == ObjCommit {
 			info := ParseCommitObject(obj.OID, obj.Data)
 			s.commits[obj.OID] = info

@@ -132,6 +132,60 @@ func TestGitProxyUploadPackFetchCached(t *testing.T) {
 	}
 }
 
+func TestGitProxyModifiedFetchFailureReturns502(t *testing.T) {
+	// Backend returns 200 OK with mock response
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("THIN-PACK-FROM-UPSTREAM"))
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	c := cache.NewInMemoryCache(1 * time.Minute)
+	repoCache := NewRepoCacheManager("")
+	s := NewServer(Config{
+		DefaultTargetURL: backend.URL,
+		Cache:            c,
+		CacheTTL:         10 * time.Minute,
+		Transport:        backend.Client().Transport,
+	})
+	s.RepoCache = repoCache
+
+	repoPath := "/repo.git/git-upload-pack"
+	repoStore := repoCache.GetRepoStore(repoPath)
+
+	// Pre-seed repoStore with a known commit so that upstream request will be augmented with extra haves
+	knownCommit := "1111111111111111111111111111111111111111"
+	repoStore.commits[knownCommit] = &CommitInfo{
+		OID:     knownCommit,
+		Tree:    "3333333333333333333333333333333333333333",
+		Parents: nil,
+	}
+
+	// Client requests commit 2222... which is NOT in the store
+	wantCommit := "2222222222222222222222222222222222222222"
+	fetchBody := []byte(fmt.Sprintf("0032want %s\n00000009done\n", wantCommit))
+
+	req := httptest.NewRequest("POST", fmt.Sprintf("/%s%s", u.Host, repoPath), bytes.NewReader(fetchBody))
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+
+	// Since upstreamReqBody was augmented with have 1111..., upstream pack is thin and client response
+	// must come from store. But store doesn't have wantCommit (upstream returned dummy data that wasn't a valid pack),
+	// so serveFetchFromStore must fail, returning 502 Bad Gateway.
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected status 502 Bad Gateway, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	// Verify nothing was stored in the cache under this request key
+	targetURL := u.ResolveReference(&url.URL{Path: repoPath})
+	key := s.computeCacheKey(req, targetURL, fetchBody)
+	if _, ok := c.Get(key); ok {
+		t.Errorf("expected nothing cached for failed fetch, but found cached entry")
+	}
+}
+
 func TestGitProxyObjectRequestCachedOnDisk(t *testing.T) {
 	var upstreamHits int32
 	tmpDir := t.TempDir()
