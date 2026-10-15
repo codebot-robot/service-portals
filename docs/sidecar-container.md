@@ -1,135 +1,278 @@
 # Service Portal - Sidecar Container Configuration
 
-This document describes how to deploy the **All-In-One Service Portal** as a sidecar container inside a Kubernetes pod. This deployment pattern centralizes authentication and credentials management without exposing API keys or tokens to the application (workload) container, and without requiring code changes to the application.
+This document describes how to deploy the **All-In-One Service Portal** as a transparent sidecar container inside a Kubernetes pod. This deployment pattern centralizes authentication and credential management without exposing API keys or tokens to the application (workload) container, and without requiring code changes to the application.
 
 ---
 
 ## Architecture Overview
 
-In a sidecar deployment model, the workload container and the Service Portal proxy run within the same Kubernetes Pod, sharing the same network namespace and loopback interface.
+In a sidecar deployment model, the workload container, the `init-service-portals` init container, and the `all-in-one-portal` proxy container run within the same Kubernetes Pod, sharing the same network namespace, loopback interface, and pod-local storage volumes.
 
-An `initContainer` is used to configure `iptables` NAT rules before the main containers start. These rules transparently intercept outbound TCP traffic on designated ports (e.g., `80` and `443`) and redirect them to the local proxy port (`8080`).
+The `init-service-portals` container runs prior to the application start. It generates a pod-local Root CA and configures `iptables` rules to transparently intercept outbound TCP traffic:
+- Port `80` (HTTP) is redirected to local proxy port `8080`.
+- Port `443` (HTTPS) is redirected to local proxy port `8443`.
+- Strict egress filtering is applied to reject direct connections to unintercepted ports.
 
 ```
-+------------------------------------------------------------------------+
-|                               POD                                      |
-|                                                                        |
-|  +--------------------+                      +----------------------+  |
-|  | Workload Container |                      |   Sidecar Container  |  |
-|  |                    |                      | (all-in-one-portal)  |  |
-|  | Makes HTTP request |                      |                      |  |
-|  | to external host   |                      | Listens on :8080     |  |
-|  +---------+----------+                      +----------+-----------+  |
-|            |                                            ^              |
-|            v                                            |              |
-|   [ Outbound TCP Port 80/443 ]                          |              |
-|            |                                            |              |
-|            +--------- (Redirected via iptables) --------+              |
-|                                                                        |
-+------------------------------------------------------------------------+
++---------------------------------------------------------------------------------+
+|                                       POD                                       |
+|                                                                                 |
+|  +--------------------+                               +----------------------+  |
+|  | Workload Container |                               | Sidecar Container    |  |
+|  | (runAsUser: 1000)  |                               | (all-in-one-portal)  |  |
+|  |                    |                               | (runAsUser: 1337)    |  |
+|  | Makes HTTP/HTTPS   |  Port 80 (HTTP) -> :8080      |                      |  |
+|  | request to host    |------------------------------>| HTTP Listener (:8080)|  |
+|  | (gemini.backend)   |                               |                      |  |
+|  |                    |  Port 443 (HTTPS) -> :8443    | HTTPS Listener(:8443)|  |
+|  |                    |------------------------------>| Dynamic SNI Cert     |  |
+|  +--------------------+                               +----------+-----------+  |
+|                                                                  |              |
++------------------------------------------------------------------|--------------+
+                                                                   v Outbound TLS
+                                                         +--------------------+
+                                                         | External API       |
+                                                         +--------------------+
 ```
 
 ---
 
-## Setup and Configuration
+## Complete Kubernetes Manifest (`k8s/sidecar.yaml`)
 
-### 1. Transparent Redirection & Bypass Prevention via `iptables` (`initContainer`)
-
-The `init-service-portals` container is a minimal container running as `root` with `NET_ADMIN` privileges. It executes a shell script that sets up `iptables` rules in both the `nat` and `filter` tables:
-
-#### Traffic Redirection (`nat` Table)
-1. Creates a custom chain `PORTAL_OUTPUT` inside the `nat` table.
-2. Jumps to `PORTAL_OUTPUT` from the main `OUTPUT` chain for all TCP traffic.
-3. Excludes loopback (`lo`) interface traffic so local container communication remains unaffected.
-4. Excludes traffic originating from the proxy's UID (e.g., `1337`) to avoid infinite redirection loops when forwarding upstream.
-5. Redirects specified destination TCP ports (e.g., `80,443`) to the local proxy port (`8080`).
-
-#### Bypass Prevention & Security (`filter` Table)
-To prevent malicious or misconfigured applications in the workload container from bypassing the proxy (e.g., by connecting directly to an external IP on a different port like `8080`), we enforce strict egress filtering on the `OUTPUT` chain:
-1. **Allow loopback interface (`lo`)** traffic, enabling the workload to reach the redirected proxy.
-2. **Allow all traffic destined for localhost (127.0.0.1) and the local proxy port (8080)** to ensure redirected packets bypass the egress filter.
-3. **Allow established and related connections** (`-m conntrack --ctstate ESTABLISHED,RELATED`), which is required for inbound liveness/readiness probes and system checks to function correctly.
-4. **Allow all outbound traffic from the proxy UID** (`1337`) so it can securely contact the real external APIs.
-5. **Allow standard DNS lookups** (UDP and TCP on port 53) so the workload can resolve target hosts.
-6. **Reject/Block all other outbound TCP/UDP traffic** to external networks. Any direct connections initiated by the workload to external endpoints are immediately blocked.
-
-### 2. Sidecar Proxy Container
-
-The sidecar container runs the `all-in-one-portal`. Crucially, it must run with the security context matching the bypassed `PROXY_UID` (e.g., `1337`).
-
-It is configured using the `--rules-dir` CLI flag (or `RULES_DIR` environment variable), pointing to a directory where `PortalRule` configuration files are defined. In Kubernetes, this directory is typically backed by a Secret volume mount containing the API keys and routing configuration.
-
-### 3. Workload Security Context (Best Practice)
-
-Since our iptables NAT rules bypass traffic originating from UID `1337` to avoid infinite loops, it is recommended best practice to configure the workload container to ensure it cannot execute outbound requests as UID `1337`.
-
-We can enforce this defense-in-depth security configuration by applying the following workload settings:
-* **Enforce non-root execution or different UID**: Configure the workload container to run as a user other than `1337` (e.g., `runAsUser: 1000` and `runAsNonRoot: true`).
-* **Disable Privilege Escalation**: Configure `allowPrivilegeEscalation: false` in the workload container's security context. This disables the execution of any `setuid` or `setgid` binaries, ensuring processes cannot escalate privileges or execute code under the bypassed proxy UID `1337`.
-
----
-
-## Comparison: REDIRECT vs TPROXY
-
-During the design phase, we evaluated two primary methods for transparent traffic interception in iptables: `REDIRECT` and `TPROXY`.
-
-| Criteria | `REDIRECT` (Chosen) | `TPROXY` |
-| :--- | :--- | :--- |
-| **Ease of Setup** | **Very High**: Single `iptables` rule redirects traffic directly to the local port. | **Moderate**: Requires creating custom IP routing tables, rule policies, and firewall marks. |
-| **Privileges** | Requires `NET_ADMIN` in `initContainer` only. | Requires `NET_ADMIN` in `initContainer`, and the proxy socket listener may require additional capabilities/privileges depending on binding. |
-| **Proxy Code Complexity** | **None**: The proxy application uses standard TCP/HTTP listeners (e.g., `http.ListenAndServe`). | **High**: The proxy listener must use socket-level options like `IP_TRANSPARENT` to accept traffic destined for arbitrary remote IPs. |
-| **IP/Port Preservation** | Overwrites the destination IP to `127.0.0.1`. (The proxy relies on the HTTP `Host` header to determine routing). | Preserves the original destination IP at the network layer. |
-
-### Why We Chose `REDIRECT`
-
-Since the Service Portals rely on standard HTTP routing based on the HTTP `Host` header (e.g., `Host: gemini.backend`), we do not need to preserve the remote destination IP at the TCP layer. `REDIRECT` is simpler, more stable, and allows our Go proxy to run without any custom socket-level logic or extra network privileges.
-
----
-
-## CA Certificate Store Population
-
-When intercepting HTTPS traffic (port `443`), the sidecar proxy acts as a man-in-the-middle to inject credentials, meaning it terminates TLS and re-encrypts requests using a custom CA certificate. 
-
-For the workload container to trust these intercepted TLS connections, it must trust the proxy's CA certificate. The easiest way to distribute this trust without modifying the workload container image is to use a shared `emptyDir` volume to populate the trusted CA certificate store.
-
-### How it Works
-
-1. Define a shared `emptyDir` volume (e.g., `ca-certs-volume`).
-2. Mount the volume at the trusted CA certs directory of the workload container (e.g., `/etc/ssl/certs`).
-3. In the `initContainer`, copy the system's default bundle of trusted CA certificates into the shared volume, and append the proxy's custom CA certificate to that bundle. This ensures the workload container continues to trust public CA certificates while also trusting the proxy's certificate.
-
-#### Example Configuration Snippet
+Below is the complete, production-ready manifest implementing the transparent sidecar pattern:
 
 ```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: all-in-one-portal-sidecar-secret
+stringData:
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: https://generativelanguage.googleapis.com
+      authToken: gemini-api-key-here
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: https://api.github.com
+      authToken: github-token-here
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workload-with-sidecar
+  labels:
+    app: workload-with-sidecar
 spec:
-  volumes:
-  - name: shared-ca-certs
-    emptyDir: {}
-  - name: portal-ca-secret
-    secret:
-      secretName: service-portal-ca
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workload-with-sidecar
+  template:
+    metadata:
+      labels:
+        app: workload-with-sidecar
+    spec:
+      # Use hostAliases to map backend hostnames to dummy IPs so that they resolve
+      # in the pod and trigger TCP connection attempts on port 80/443, which are then
+      # transparently intercepted by iptables.
+      hostAliases:
+      - ip: "8.8.8.8" # or any arbitrary IP; iptables will intercept all TCP traffic on target ports
+        hostnames:
+        - "gemini.backend"
+        - "github.backend"
 
-  initContainers:
-  - name: init-certs
-    image: debian:bookworm-slim
-    command: ["/bin/sh", "-c"]
-    args:
-    - |
-      # Copy system certs to shared volume
-      cp -r /etc/ssl/certs/* /shared-certs/
-      # Append custom CA certificate
-      cat /secret-certs/tls.crt >> /shared-certs/ca-certificates.crt
-    volumeMounts:
-    - name: shared-ca-certs
-      mountPath: /shared-certs
-    - name: portal-ca-secret
-      mountPath: /secret-certs
-      readOnly: true
+      initContainers:
+      # The init container configures the iptables rules and generates the Root CA
+      # within the shared pod network/storage namespace. It requires NET_ADMIN capability and root user.
+      - name: init-service-portals
+        image: init-service-portals:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: PROXY_PORT
+          value: "8080"
+        - name: PROXY_HTTPS_PORT
+          value: "8443"
+        - name: PROXY_UID
+          value: "1337"
+        - name: INTERCEPT_PORTS
+          value: "80,443"
+        - name: CHOWN_UID
+          value: "1337"
+        - name: CHOWN_GID
+          value: "1337"
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+          runAsUser: 0
+          runAsGroup: 0
+          privileged: false
+        volumeMounts:
+        - name: ca-cert
+          mountPath: /etc/service-portal/ca
+        - name: ca-key
+          mountPath: /etc/service-portal/ca-private
 
-  containers:
-  - name: workload
-    image: alpine:latest
-    volumeMounts:
-    - name: shared-ca-certs
-      mountPath: /etc/ssl/certs
+      containers:
+      # 1. The Workload Container: representing the actual application that is consuming
+      # external services. It has no access to the API tokens, and simply makes
+      # standard HTTP requests to `http://gemini.backend` or HTTPS with the local CA cert.
+      # NOTE: It is best practice to configure the workload container with a securityContext
+      # that prevents it from running as the proxy UID (1337) and prevents privilege escalation
+      # (disabling setuid/setgid binaries). This ensures that any process inside the workload
+      # container cannot run as UID 1337 and bypass our iptables redirection rules.
+      - name: workload
+        image: alpine:latest
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+        command: ["/bin/sh", "-c"]
+        args: ["while true; do sleep 3600; done"]
+        volumeMounts:
+        - name: ca-cert
+          mountPath: /etc/service-portal/ca
+          readOnly: true
+
+      # 2. The Sidecar Container: runs the all-in-one-portal proxy.
+      # It must run as the specified non-root user (UID 1337) matching PROXY_UID so that
+      # its outbound requests are not intercepted and redirected to itself.
+      - name: service-portal-sidecar
+        image: all-in-one-portal:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 1337
+          runAsGroup: 1337
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        ports:
+        - containerPort: 8080
+          name: proxy
+        - containerPort: 8443
+          name: proxy-https
+        env:
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca-private/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca-private/tls.key"
+        args: ["--rules-dir=/etc/portals"]
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+        - name: ca-key
+          mountPath: /etc/service-portal/ca-private
+          readOnly: true
+
+      volumes:
+      - name: rules-volume
+        secret:
+          secretName: all-in-one-portal-sidecar-secret
+      - name: ca-cert
+        emptyDir: {}
+      - name: ca-key
+        emptyDir: {}
 ```
+
+---
+
+## Detailed Component Walkthrough
+
+### 1. Ephemeral Pod-Local CA Generation
+When the pod starts:
+1. `init-service-portals` executes `/usr/local/bin/init-service-portals`.
+2. It generates a self-signed 2048-bit RSA Root Certificate Authority valid for 10 years.
+3. The public certificate (`tls.crt`) is saved in `/etc/service-portal/ca` (`ca-cert` volume).
+4. The private key (`tls.key`) and certificate are saved in `/etc/service-portal/ca-private` (`ca-key` volume) with file permissions `0600` and ownership changed to UID/GID `1337` (`CHOWN_UID` and `CHOWN_GID`).
+5. The `ca-key` volume is mounted **only into the sidecar proxy container**, completely inaccessible to the workload.
+
+### 2. DNS Resolution via `hostAliases`
+When workloads make requests to fake hostnames such as `http://gemini.backend` or `https://github.backend`, standard DNS resolution inside Kubernetes would fail because these domains are not registered with CoreDNS.
+
+Using Kubernetes `spec.hostAliases`:
+```yaml
+hostAliases:
+- ip: "8.8.8.8"
+  hostnames:
+  - "gemini.backend"
+  - "github.backend"
+```
+Kubernetes injects these entries into `/etc/hosts` in the pod. When the workload initiates a TCP connection to `gemini.backend:80` or `gemini.backend:443`, the kernel attempts to connect to `8.8.8.8`, which is instantly intercepted and redirected by `iptables`.
+
+### 3. Transparent Redirection & Egress Filtering (`iptables`)
+The `init-service-portals` container sets up the following rules:
+
+#### Traffic Redirection (`nat` Table)
+1. Creates chain `PORTAL_OUTPUT` attached to `OUTPUT` for TCP.
+2. Excludes loopback (`-o lo -j RETURN`).
+3. Excludes proxy UID `1337` (`-m owner --uid-owner 1337 -j RETURN`) to prevent infinite redirection loops.
+4. Redirects TCP destination port `443` to `8443` (`PROXY_HTTPS_PORT`).
+5. Redirects other specified TCP destination ports (e.g. `80`) to `8080` (`PROXY_PORT`).
+
+#### Bypass Prevention (`filter` Table)
+1. Allows loopback traffic (`-o lo -j ACCEPT`).
+2. Allows traffic to `127.0.0.1` and proxy ports `8080` and `8443`.
+3. Allows established and related connections (`-m conntrack --ctstate ESTABLISHED,RELATED`).
+4. Allows all outbound traffic from proxy UID `1337`.
+5. Allows DNS lookups on port 53 (UDP and TCP).
+6. **Rejects all other outbound TCP and UDP traffic** (`-j REJECT --reject-with icmp-port-unreachable`).
+
+### 4. Sidecar Proxy Container (`all-in-one-portal`)
+The proxy container runs as UID `1337` and listens on:
+- **Port 8080 (HTTP)**: Handles cleartext HTTP traffic redirected from port 80.
+- **Port 8443 (HTTPS)**: Uses the CA private key in `/etc/service-portal/ca-private/tls.key` and certificate in `/etc/service-portal/ca-private/tls.crt` to dynamically sign TLS certificates for the requested SNI hostname.
+
+The proxy monitors the `--rules-dir` directory for `PortalRule` YAML files and reloads configuration dynamically on `SIGHUP`.
+
+### 5. Workload Security Hardening
+To prevent a workload process from bypassing the iptables redirection:
+- **Do not run as UID 1337**: Configure `runAsUser: 1000` (or another unprivileged UID) and `runAsNonRoot: true`.
+- **Disable Privilege Escalation**: Set `allowPrivilegeEscalation: false`. This blocks `setuid` binaries (such as `sudo` or setuid helpers) from changing the process UID to `1337`.
+
+---
+
+## Workload CA Trust Configuration
+
+For HTTPS requests, the workload container must trust the pod-local CA certificate mounted at `/etc/service-portal/ca/tls.crt`.
+
+Depending on your application stack:
+
+### Command-line Tools (`curl`, `wget`)
+```bash
+# curl
+curl --cacert /etc/service-portal/ca/tls.crt https://gemini.backend/v1/models
+
+# wget
+wget --ca-certificate=/etc/service-portal/ca/tls.crt -qO- https://gemini.backend/v1/models
+```
+
+### Environment Variables
+Most modern HTTP client libraries respect standard environment variables:
+```bash
+export SSL_CERT_FILE=/etc/service-portal/ca/tls.crt
+export REQUESTS_CA_BUNDLE=/etc/service-portal/ca/tls.crt
+export NODE_EXTRA_CA_CERTS=/etc/service-portal/ca/tls.crt
+```
+
+### System CA Store (Linux Distributions)
+If the workload container runs as root during a custom entrypoint (or if using an entrypoint script before dropping privileges), the CA can be added to the system bundle:
+```bash
+# Debian / Ubuntu
+cp /etc/service-portal/ca/tls.crt /usr/local/share/ca-certificates/portal-ca.crt
+update-ca-certificates
+
+# Alpine
+cp /etc/service-portal/ca/tls.crt /usr/local/share/ca-certificates/portal-ca.crt
+update-ca-certificates
+```
+
+Alternatively, mount the `ca-cert` volume directly to the system certificate location or bundle if your workload image supports it.
