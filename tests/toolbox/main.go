@@ -192,7 +192,10 @@ func runProbe(args []string) {
 				}
 			}
 
-			if resolv, err := os.ReadFile("/etc/resolv.conf"); err == nil {
+			resolv, err := os.ReadFile("/etc/resolv.conf")
+			if err != nil {
+				log.Printf("failed to read /etc/resolv.conf: %v", err)
+			} else {
 				fmt.Fprintf(os.Stderr, "/etc/resolv.conf:\n%s\n", string(resolv))
 			}
 			log.Fatalf("dns lookup of %s failed: %v", name, lastErr)
