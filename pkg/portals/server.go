@@ -46,12 +46,17 @@ type Config struct {
 }
 
 func Run(ctx context.Context, config Config) error {
-	target := os.Getenv("TARGET_URL")
-	if target == "" {
-		target = config.DefaultTargetURL
+	rulesDir := config.RulesDir
+	if rulesDir == "" {
+		rulesDir = os.Getenv("RULES_DIR")
 	}
-	if target == "" {
-		target = "https://generativelanguage.googleapis.com"
+
+	target := os.Getenv("TARGET_URL")
+	if target == "" && rulesDir == "" {
+		target = config.DefaultTargetURL
+		if target == "" {
+			target = "https://generativelanguage.googleapis.com"
+		}
 	}
 
 	upstreamAuthToken := os.Getenv("UPSTREAM_AUTH_TOKEN")
@@ -68,17 +73,21 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
-	targetURL, err := url.Parse(target)
-	if err != nil {
-		return fmt.Errorf("invalid TARGET_URL: %w", err)
-	}
-
 	caCertPath := os.Getenv("CA_CERT_PATH")
 	caKeyPath := os.Getenv("CA_KEY_PATH")
 
-	p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to create proxy: %w", err)
+	var fallback *proxy.HTTPProxy
+	if target != "" {
+		targetURL, err := url.Parse(target)
+		if err != nil {
+			return fmt.Errorf("invalid TARGET_URL: %w", err)
+		}
+
+		p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to create proxy: %w", err)
+		}
+		fallback = p
 	}
 
 	var c *cache.InMemoryCache
@@ -102,23 +111,23 @@ func Run(ctx context.Context, config Config) error {
 		}
 
 		c = cache.NewInMemoryCache(cleanupInterval)
-		p.Transport = proxy.NewCachingTransport(c, p.Transport, cacheTTL)
+		if fallback != nil {
+			fallback.Transport = proxy.NewCachingTransport(c, fallback.Transport, cacheTTL)
+		}
 		log.Printf("Enabled caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
 	}
 
-	if config.SetupProxy != nil {
-		config.SetupProxy(p)
+	if config.SetupProxy != nil && fallback != nil {
+		config.SetupProxy(fallback)
 	}
 
-	rulesDir := config.RulesDir
-	if rulesDir == "" {
-		rulesDir = os.Getenv("RULES_DIR")
-	}
-
-	var handler http.Handler = p
-
+	var handler http.Handler
 	if rulesDir != "" {
-		rr := NewRuleRouter(rulesDir, p, caCertPath, caKeyPath, cacheTTL, c)
+		var fallbackHandler http.Handler
+		if fallback != nil {
+			fallbackHandler = fallback
+		}
+		rr := NewRuleRouter(rulesDir, fallbackHandler, caCertPath, caKeyPath, cacheTTL, c)
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}
@@ -142,6 +151,8 @@ func Run(ctx context.Context, config Config) error {
 		}()
 
 		handler = rr
+	} else {
+		handler = fallback
 	}
 
 	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
@@ -180,9 +191,18 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
+	targetDesc := target
+	if rulesDir != "" {
+		if target != "" {
+			targetDesc = fmt.Sprintf("rules from %s (fallback: %s)", rulesDir, target)
+		} else {
+			targetDesc = fmt.Sprintf("rules from %s", rulesDir)
+		}
+	}
+
 	errChan := make(chan error, 2)
 	go func() {
-		log.Printf("Starting HTTP proxy on :%s forwarding to %s", port, target)
+		log.Printf("Starting HTTP proxy on :%s forwarding to %s", port, targetDesc)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("HTTP server failed: %w", err)
 		}
@@ -190,7 +210,7 @@ func Run(ctx context.Context, config Config) error {
 
 	if httpsSrv != nil {
 		go func() {
-			log.Printf("Starting HTTPS proxy on :%s forwarding to %s", httpsPort, target)
+			log.Printf("Starting HTTPS proxy on :%s forwarding to %s", httpsPort, targetDesc)
 			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				errChan <- fmt.Errorf("HTTPS server failed: %w", err)
 			}

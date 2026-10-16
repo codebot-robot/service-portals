@@ -69,12 +69,16 @@ stringData:
 - **Dynamic Reload via `SIGHUP`**: The proxy listens for the `SIGHUP` signal. When received, it re-scans the rules directory and rebuilds the routing table in-memory without dropping existing connections or terminating the process.
 
 ### Fallback & Unmatched Host Behavior
-When an incoming request arrives for a host that does **not** match any loaded `PortalRule`:
-1. **Fallback Proxy**: If a fallback target is active (which happens whenever `TARGET_URL` is set, or defaults to `https://generativelanguage.googleapis.com` in `all-in-one-portal` / `service-portal`), the request falls through to the fallback proxy. The fallback proxy rewrites the request to `TARGET_URL` and injects `UPSTREAM_AUTH_TOKEN` (if configured).
-2. **HTTPS Dynamic Certificate**: If the request is HTTPS arriving on `HTTPS_PORT`, the proxy falls back to minting a certificate for that hostname using the fallback proxy's CA signer.
-3. **HTTP 404**: If no fallback handler is present, the proxy responds with HTTP `404 Not Found`.
+When `--rules-dir` / `RULES_DIR` is set:
+1. **Default Egress Allowlist (No Fallback)**: By default, the proxy operates as a strict egress allowlist. If an incoming request arrives for a host that does **not** match any loaded `PortalRule`, the request is rejected:
+   - **HTTP**: The proxy responds with HTTP `403 Forbidden` (`Access Denied: host not allowed by portal rules`) and logs `Request: <METHOD> <HOST> | Matched rule: <none> | Action: denied`.
+   - **HTTPS**: Dynamic certificate generation refuses to sign a certificate for unmatched hosts (`GetCertificate` returns an error), causing the client TLS handshake to fail.
+2. **Explicit Fallback Proxy**: If `TARGET_URL` is explicitly set in the environment, fallback behavior is enabled:
+   - Unmatched requests fall through to the fallback proxy, rewritten to `TARGET_URL` with `UPSTREAM_AUTH_TOKEN` (if configured), and log `Request: <METHOD> <HOST> | Matched rule: <none> | Action: fallback`.
+   - For HTTPS, the fallback proxy's CA signer mints a dynamic certificate.
+3. **No Rules Directory (`service-portal`, `gemini-portal`, etc.)**: When no rules directory is configured, the proxy forwards all traffic to `TARGET_URL` (defaulting to the portal's default target URL, e.g. Gemini).
 
-> **Note on Egress Filtering vs Routing**: The `iptables` egress filter rejects outbound traffic to ports that are not redirected to the proxy. However, for traffic sent to intercepted ports (e.g. 80 and 443), any unlisted hostname will currently be forwarded to the fallback `TARGET_URL` rather than being dropped with an error. To avoid unexpected forwarding of unmatched traffic, be aware of your configured `TARGET_URL`.
+Note that once a rules directory is configured, `config.DefaultTargetURL` (what `gemini-portal`, `anthropic-portal`, and `github-portal` set) is intentionally ignored so that the proxy strictly enforces the rule allowlist rather than silently falling back to a default provider endpoint. Fallback to an upstream target is only enabled when `TARGET_URL` is explicitly set via the environment.
 
 ---
 
@@ -89,7 +93,7 @@ These variables configure the HTTP/HTTPS proxy servers.
 | `PORT` | `8080` | Port to listen on for standard HTTP requests and transparently redirected port 80 traffic. |
 | `HTTPS_PORT` | `8443` | Port to listen on for TLS connections and transparently redirected port 443 traffic. Always started; if `CA_CERT_PATH` and `CA_KEY_PATH` are not configured, the listener is active but incoming TLS handshakes fail with a certificate signing error. |
 | `RULES_DIR` / `--rules-dir` | `""` | Directory containing `PortalRule` YAML files. The `--rules-dir` flag takes precedence over the environment variable. |
-| `TARGET_URL` | *See below* | Fallback / default target URL. Defaults: <br>• `service-portal` & `all-in-one-portal`: `https://generativelanguage.googleapis.com`<br>• `gemini-portal`: `https://generativelanguage.googleapis.com`<br>• `anthropic-portal`: `https://api.anthropic.com`<br>• `github-portal`: `https://api.github.com/` |
+| `TARGET_URL` | *See below* | Fallback / default target URL. With a rules directory (`--rules-dir` / `RULES_DIR`), both `all-in-one-portal` and `service-portal` (as well as provider-specific portals) deny unmatched hosts unless `TARGET_URL` is explicitly set in the environment. Without a rules directory, defaults to:<br>• `service-portal` & `all-in-one-portal`: `https://generativelanguage.googleapis.com`<br>• `gemini-portal`: `https://generativelanguage.googleapis.com`<br>• `anthropic-portal`: `https://api.anthropic.com`<br>• `github-portal`: `https://api.github.com/` |
 | `UPSTREAM_AUTH_TOKEN` | `""` | Default token injected into requests when falling through to `TARGET_URL`. |
 | `UPSTREAM_AUTH_HEADER` | *See below* | Header used for `UPSTREAM_AUTH_TOKEN`. Defaults: <br>• `gemini-portal`: `x-goog-api-key`<br>• `anthropic-portal`: `x-api-key`<br>• `service-portal`, `all-in-one-portal`, `github-portal`: `Authorization` |
 | `CA_CERT_PATH` | `""` | Path to public Root CA certificate PEM file (`tls.crt`). Required for TLS interception and dynamic cert minting. |
@@ -116,6 +120,7 @@ Configured via environment variables on the `init-service-portals` container and
 | `CA_PRIVATE_DIR` | `/etc/service-portal/ca-private` | Destination directory where the CA certificate (`tls.crt`) and private key (`tls.key`) are written. Mounted only to the proxy container. |
 | `CHOWN_UID` | `-1` | UID to chown the `CA_PRIVATE_DIR` and `tls.key` to. In sidecar mode, set to `1337`. (`-1` leaves unchanged). |
 | `CHOWN_GID` | `-1` | GID to chown the `CA_PRIVATE_DIR` and `tls.key` to. In sidecar mode, set to `1337`. (`-1` leaves unchanged). |
+| `DNS_SERVER_IPS` | `/etc/resolv.conf` nameservers | Comma-separated list of DNS server IPs allowed for outbound UDP/TCP port 53 traffic. If unset, automatically reads nameservers from `/etc/resolv.conf`. All other DNS destinations are rejected by default. |
 
 #### CLI Flags (`cmd/init-service-portals`)
 

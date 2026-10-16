@@ -233,8 +233,8 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Request: %s %s | Matched rule: <none> | Action: not found", r.Method, host)
-	http.Error(w, "Not Found", http.StatusNotFound)
+	log.Printf("Request: %s %s | Matched rule: <none> | Action: denied", r.Method, host)
+	http.Error(w, "Access Denied: host not allowed by portal rules", http.StatusForbidden)
 }
 
 // GetCertificate implements the CertificateProvider interface to dynamically return certificates for TLS connections.
@@ -258,5 +258,5 @@ func (rr *RuleRouter) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificat
 		return fallbackProxy.GetCertificate(info)
 	}
 
-	return nil, fmt.Errorf("no proxy available to sign certificate for %s", host)
+	return nil, fmt.Errorf("no rule matches host %q and no fallback configured to sign certificate", host)
 }
