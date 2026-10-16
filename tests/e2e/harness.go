@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"bytes"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -177,4 +178,75 @@ func (h *Harness) GetDeploymentLogs(name string) string {
 		h.t.Fatalf("Failed to get logs for deployment %s: %v\nOutput: %s", name, err, out)
 	}
 	return string(out)
+}
+
+func (h *Harness) InstallNodeHook() {
+	h.t.Helper()
+	h.t.Logf("Installing runtime interception hook on kind control-plane node")
+	nodeName := h.ClusterName + "-control-plane"
+
+	hookScript := `#!/bin/bash
+set -eo pipefail
+
+STATE=$(cat)
+PID=$(echo "$STATE" | jq -r .pid)
+BUNDLE=$(echo "$STATE" | jq -r .bundle)
+
+if [ ! -f "$BUNDLE/config.json" ]; then
+  exit 0
+fi
+
+CONTAINER_NAME=$(jq -r ".annotations[\"io.kubernetes.cri.container-name\"] // empty" "$BUNDLE/config.json")
+POD_NAME=$(jq -r ".annotations[\"io.kubernetes.cri.sandbox-name\"] // empty" "$BUNDLE/config.json")
+
+if [[ "$POD_NAME" != *"test-client-sidecar-deny"* ]]; then
+  exit 0
+fi
+
+if [ "$CONTAINER_NAME" == "service-portal-sidecar" ]; then
+  nsenter -t "$PID" -n bash -c "
+    iptables -t nat -N PORTAL_OUTPUT || true
+    iptables -t nat -F PORTAL_OUTPUT
+    iptables -t nat -C OUTPUT -p tcp -j PORTAL_OUTPUT 2>/dev/null || iptables -t nat -A OUTPUT -p tcp -j PORTAL_OUTPUT
+
+    iptables -t nat -A PORTAL_OUTPUT -o lo -j RETURN
+    iptables -t nat -A PORTAL_OUTPUT -m owner --uid-owner 1337 -j RETURN
+
+    iptables -t nat -A PORTAL_OUTPUT -p tcp --dport 80 -j REDIRECT --to-ports 8080
+    iptables -t nat -A PORTAL_OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports 8443
+
+    iptables -N PORTAL_EGRESS || true
+    iptables -F PORTAL_EGRESS
+    iptables -C OUTPUT -j PORTAL_EGRESS 2>/dev/null || iptables -A OUTPUT -j PORTAL_EGRESS
+
+    iptables -A PORTAL_EGRESS -o lo -j ACCEPT
+    iptables -A PORTAL_EGRESS -d 127.0.0.1 -j ACCEPT
+    iptables -A PORTAL_EGRESS -d 127.0.0.1 -p tcp --dport 8080 -j ACCEPT
+    iptables -A PORTAL_EGRESS -d 127.0.0.1 -p tcp --dport 8443 -j ACCEPT
+    iptables -A PORTAL_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    iptables -A PORTAL_EGRESS -m owner --uid-owner 1337 -j ACCEPT
+
+    iptables -A PORTAL_EGRESS -p udp -d 10.96.0.10 --dport 53 -j ACCEPT
+    iptables -A PORTAL_EGRESS -p tcp -d 10.96.0.10 --dport 53 -j ACCEPT
+
+    iptables -A PORTAL_EGRESS -p tcp -j REJECT --reject-with icmp-port-unreachable
+    iptables -A PORTAL_EGRESS -p udp -j REJECT --reject-with icmp-port-unreachable
+  "
+fi
+`
+	setupCmd := fmt.Sprintf(`cat << 'EOF' > /kind/bin/portal-hook.sh
+%s
+EOF
+chmod +x /kind/bin/portal-hook.sh
+jq '.hooks.createRuntime = [{"path": "/kind/bin/portal-hook.sh"}]' /etc/containerd/cri-base.json > /tmp/cri.json && mv /tmp/cri.json /etc/containerd/cri-base.json
+systemctl restart containerd
+`, hookScript)
+
+	cmd := exec.Command("docker", "exec", nodeName, "bash", "-c", setupCmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Fatalf("Failed to install node hook: %v\nOutput: %s", err, out)
+	}
+	time.Sleep(5 * time.Second)
+	h.RunCommand("kubectl", "wait", "--for=condition=Ready", "node/"+nodeName, "--timeout=60s")
 }
