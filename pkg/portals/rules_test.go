@@ -16,8 +16,15 @@ package portals
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -489,7 +496,7 @@ spec:
 		}
 	}
 
-	// Test case C: not found action (if fallback is nil)
+	// Test case C: denied action (if fallback is nil)
 	{
 		logBuf.Reset()
 		rrNoFallback := NewRuleRouter(tmpDir, nil, "", "", 0, nil)
@@ -501,10 +508,175 @@ spec:
 		rec := httptest.NewRecorder()
 		rrNoFallback.ServeHTTP(rec, req)
 
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected status 403 Forbidden, got: %d", rec.Code)
+		}
+
 		logStr := logBuf.String()
-		expectedLog := "Request: PUT other-test.portal | Matched rule: <none> | Action: not found"
+		expectedLog := "Request: PUT other-test.portal | Matched rule: <none> | Action: denied"
 		if !strings.Contains(logStr, expectedLog) {
 			t.Errorf("expected log to contain %q, got: %q", expectedLog, logStr)
 		}
 	}
+}
+
+func createTestCA(t *testing.T) (certPath, keyPath string) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("failed to generate serial number: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "Test CA",
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("failed to create CA cert: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	certPath = filepath.Join(tmpDir, "ca.crt")
+	keyPath = filepath.Join(tmpDir, "ca.key")
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("failed to marshal private key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
+
+	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+		t.Fatalf("failed to write ca.crt: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		t.Fatalf("failed to write ca.key: %v", err)
+	}
+
+	return certPath, keyPath
+}
+
+func TestUnmatchedHostBehavior(t *testing.T) {
+	caCertPath, caKeyPath := createTestCA(t)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("matched-backend-ok"))
+	}))
+	defer backend.Close()
+
+	fallbackBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("fallback-backend-ok"))
+	}))
+	defer fallbackBackend.Close()
+
+	rulesDir := t.TempDir()
+	ruleContent := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: allowed-rule
+spec:
+  host: "allowed.portal"
+  rewriteUrl: "%s"
+`, backend.URL)
+
+	if err := os.WriteFile(filepath.Join(rulesDir, "rule.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule.yaml: %v", err)
+	}
+
+	t.Run("with rules and no fallback (default egress allowlist)", func(t *testing.T) {
+		rr := NewRuleRouter(rulesDir, nil, caCertPath, caKeyPath, 0, nil)
+		if err := rr.loadRules(); err != nil {
+			t.Fatalf("failed to load rules: %v", err)
+		}
+
+		// 1. Matched host HTTP
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "allowed.portal"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected 200 OK for matched host, got %d", rec.Code)
+		}
+
+		// 2. Matched host HTTPS GetCertificate
+		cert, err := rr.GetCertificate(&tls.ClientHelloInfo{ServerName: "allowed.portal"})
+		if err != nil {
+			t.Errorf("expected GetCertificate to succeed for allowed.portal, got: %v", err)
+		}
+		if cert == nil {
+			t.Error("expected non-nil cert for allowed.portal")
+		}
+
+		// 3. Unmatched host HTTP -> 403 Forbidden
+		reqUnmatched := httptest.NewRequest("GET", "/test", nil)
+		reqUnmatched.Host = "unmatched.portal"
+		recUnmatched := httptest.NewRecorder()
+		rr.ServeHTTP(recUnmatched, reqUnmatched)
+		if recUnmatched.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for unmatched host without fallback, got %d", recUnmatched.Code)
+		}
+
+		// 4. Unmatched host HTTPS GetCertificate -> denied (error)
+		_, errUnmatched := rr.GetCertificate(&tls.ClientHelloInfo{ServerName: "unmatched.portal"})
+		if errUnmatched == nil {
+			t.Error("expected GetCertificate to fail for unmatched host without fallback, but it succeeded")
+		}
+	})
+
+	t.Run("with rules and explicit fallback", func(t *testing.T) {
+		fallbackURL, _ := url.Parse(fallbackBackend.URL)
+		fallbackProxy, err := proxy.NewHTTPProxy(fallbackURL, "", "", caCertPath, caKeyPath)
+		if err != nil {
+			t.Fatalf("failed to create fallback proxy: %v", err)
+		}
+
+		rr := NewRuleRouter(rulesDir, fallbackProxy, caCertPath, caKeyPath, 0, nil)
+		if err := rr.loadRules(); err != nil {
+			t.Fatalf("failed to load rules: %v", err)
+		}
+
+		// 1. Matched host still hits matched rule
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "allowed.portal"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Body.String() != "matched-backend-ok" {
+			t.Errorf("expected matched-backend-ok, got status %d body %q", rec.Code, rec.Body.String())
+		}
+
+		// 2. Unmatched host HTTP forwards to fallback
+		reqUnmatched := httptest.NewRequest("GET", "/test", nil)
+		reqUnmatched.Host = "unmatched.portal"
+		recUnmatched := httptest.NewRecorder()
+		rr.ServeHTTP(recUnmatched, reqUnmatched)
+		if recUnmatched.Code != http.StatusOK || recUnmatched.Body.String() != "fallback-backend-ok" {
+			t.Errorf("expected fallback-backend-ok, got status %d body %q", recUnmatched.Code, recUnmatched.Body.String())
+		}
+
+		// 3. Unmatched host HTTPS GetCertificate succeeds via fallback
+		cert, err := rr.GetCertificate(&tls.ClientHelloInfo{ServerName: "unmatched.portal"})
+		if err != nil {
+			t.Errorf("expected GetCertificate to succeed for unmatched host with fallback, got: %v", err)
+		}
+		if cert == nil {
+			t.Error("expected non-nil cert for unmatched host with fallback")
+		}
+	})
 }

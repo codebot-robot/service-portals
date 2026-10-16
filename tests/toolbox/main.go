@@ -15,17 +15,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: toolbox <server|client> [args]")
+		log.Fatal("Usage: toolbox <server|client|probe> [args]")
 	}
 
 	mode := os.Args[1]
@@ -37,6 +41,11 @@ func main() {
 			log.Fatal("Usage: toolbox client <url>")
 		}
 		runClient(os.Args[2])
+	case "probe":
+		if len(os.Args) < 3 {
+			log.Fatal("Usage: toolbox probe <tcp|dns> [args]")
+		}
+		runProbe(os.Args[2:])
 	default:
 		log.Fatalf("Unknown mode: %s", mode)
 	}
@@ -49,7 +58,7 @@ func runServer() {
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Received request: %s %s", r.Method, r.URL.Path)
+		log.Printf("Received request: %s %s (Host: %s)", r.Method, r.URL.Path, r.Host)
 		w.Header().Set("Content-Type", "application/json")
 
 		headers := make(map[string][]string)
@@ -101,4 +110,84 @@ func runClient(targetURL string) {
 
 	fmt.Printf("Status: %s\n", resp.Status)
 	fmt.Printf("Body: %s\n", string(body))
+}
+
+func runProbe(args []string) {
+	if len(args) < 2 {
+		log.Fatal("Usage: toolbox probe tcp <host:port> [timeout] OR toolbox probe dns <server> <name> [timeout]")
+	}
+
+	probeType := args[0]
+	switch probeType {
+	case "tcp":
+		target := args[1]
+		timeout := 3 * time.Second
+		if len(args) >= 3 {
+			d, err := time.ParseDuration(args[2])
+			if err != nil {
+				log.Fatalf("invalid duration %q: %v", args[2], err)
+			}
+			timeout = d
+		}
+		conn, err := net.DialTimeout("tcp", target, timeout)
+		if err != nil {
+			log.Fatalf("tcp dial to %s failed: %v", target, err)
+		}
+		if err := conn.Close(); err != nil {
+			log.Fatalf("failed to close connection to %s: %v", target, err)
+		}
+		fmt.Printf("CONNECTED %s\n", target)
+		os.Exit(0)
+
+	case "dns":
+		if len(args) < 3 {
+			log.Fatal("Usage: toolbox probe dns <server> <name> [timeout]")
+		}
+		server := args[1]
+		name := args[2]
+		timeout := 3 * time.Second
+		if len(args) >= 4 {
+			d, err := time.ParseDuration(args[3])
+			if err != nil {
+				log.Fatalf("invalid duration %q: %v", args[3], err)
+			}
+			timeout = d
+		}
+
+		if server == "cluster" || server == "default" {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			ips, err := net.DefaultResolver.LookupHost(ctx, name)
+			if err != nil {
+				log.Fatalf("dns lookup of %s failed: %v", name, err)
+			}
+			fmt.Printf("RESOLVED %s: %v\n", name, ips)
+			os.Exit(0)
+		}
+
+		serverAddr := server
+		if !strings.Contains(serverAddr, ":") {
+			serverAddr = serverAddr + ":53"
+		}
+
+		r := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: timeout}
+				return d.DialContext(ctx, "udp", serverAddr)
+			},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		ips, err := r.LookupHost(ctx, name)
+		if err != nil {
+			log.Fatalf("dns lookup of %s via %s failed: %v", name, serverAddr, err)
+		}
+		fmt.Printf("RESOLVED %s via %s: %v\n", name, serverAddr, ips)
+		os.Exit(0)
+
+	default:
+		log.Fatalf("Unknown probe type: %s", probeType)
+	}
 }
