@@ -35,4 +35,12 @@
 1. **Defense in Depth**: Real tokens live exclusively in Secret volume mounts attached to the proxy UID (`1337`). Workload containers run as non-root (e.g. UID `1000`) with `allowPrivilegeEscalation: false` to ensure they cannot run as UID `1337` and bypass iptables.
 2. **Deterministic Interception**: Port 80 traffic redirects to 8080 (HTTP); port 443 redirects to 8443 (HTTPS). Egress filter blocks all other outbound TCP and UDP except DNS (port 53) and proxy UID 1337.
 3. **No Code Changes to Applications**: Workloads use standard hostnames (via `hostAliases`) and standard client libraries, trusting only the pod-local public CA certificate.
-4. **Verification**: Run `go test ./...` to verify all Go packages. Ensure code passes `dev/ci/presubmits/ap-lint` and `dev/ci/presubmits/ap-test`.
+4. **Verification**: Run `go test ./...` to verify all Go packages. Ensure code passes `dev/ci/presubmits/ap-lint` and `dev/ci/presubmits/ap-test`. Reviewers will read the commit messages, so each commit should explain *why*, and behaviour changes (e.g. fail-closed defaults) must be called out in the commit body.
+
+### Commit messages and PR descriptions
+
+The git history is the permanent record; the GitHub PR description is not. It is not part of the merged artifact and is effectively lost after merge.
+
+- **Put anything worth keeping in the code or the commits**: design decisions and non-obvious behaviour belong in code comments; the reasoning behind a change belongs in the commit message.
+- **Keep the PR description to bookkeeping**: normally just `Fixes #<issue>`. Don't summarize or "sell" the change; the code and commits should stand on their own.
+- When you revise a PR in response to review, don't maintain a changelog in the PR description.
