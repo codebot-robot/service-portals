@@ -158,3 +158,23 @@ func (h *Harness) WaitForPodSuccess(name string, timeout time.Duration) {
 		time.Sleep(2 * time.Second)
 	}
 }
+
+func (h *Harness) GetServiceClusterIP(name string) string {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "get", "service", name, "-o", "jsonpath={.spec.clusterIP}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.t.Fatalf("Failed to get ClusterIP for service %s: %v\nOutput: %s", name, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (h *Harness) GetDeploymentLogs(name string) string {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "logs", "deployment/"+name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.t.Fatalf("Failed to get logs for deployment %s: %v\nOutput: %s", name, err, out)
+	}
+	return string(out)
+}
