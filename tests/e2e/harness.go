@@ -41,6 +41,7 @@ func (h *Harness) Setup() {
 	out, err := cmd.Output()
 	if err == nil && strings.Contains(string(out), h.ClusterName) {
 		h.t.Logf("Cluster %s already exists", h.ClusterName)
+		h.WaitForCoreDNS()
 		return
 	}
 
@@ -53,6 +54,36 @@ func (h *Harness) Setup() {
 	h.t.Cleanup(func() {
 		h.Teardown()
 	})
+
+	h.WaitForCoreDNS()
+}
+
+func (h *Harness) WaitForCoreDNS() {
+	h.t.Helper()
+	h.t.Logf("Waiting for CoreDNS deployment rollout")
+	h.RunCommand("kubectl", "-n", "kube-system", "rollout", "status", "deployment/coredns", "--timeout=2m")
+
+	h.t.Logf("Waiting for kube-dns service endpoints")
+	start := time.Now()
+	for {
+		cmdSlice := exec.Command("kubectl", "-n", "kube-system", "get", "endpointslices", "-l", "kubernetes.io/service-name=kube-dns", "-o", "jsonpath={.items[*].endpoints[*].addresses[*]}")
+		outSlice, errSlice := cmdSlice.CombinedOutput()
+		if errSlice == nil && len(strings.TrimSpace(string(outSlice))) > 0 {
+			h.t.Logf("kube-dns endpoint slice ready: %s", strings.TrimSpace(string(outSlice)))
+			return
+		}
+
+		cmd := exec.Command("kubectl", "-n", "kube-system", "get", "endpoints", "kube-dns", "-o", "jsonpath={.subsets[*].addresses[*].ip}")
+		out, err := cmd.CombinedOutput()
+		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			h.t.Logf("kube-dns endpoints ready: %s", strings.TrimSpace(string(out)))
+			return
+		}
+		if time.Since(start) > 2*time.Minute {
+			h.t.Fatalf("Timed out waiting for kube-dns endpoints: %v (slice: %s, ep: %s)", err, outSlice, out)
+		}
+		time.Sleep(1 * time.Second)
+	}
 }
 
 func (h *Harness) Teardown() {
@@ -177,4 +208,31 @@ func (h *Harness) GetDeploymentLogs(name string) string {
 		h.t.Fatalf("Failed to get logs for deployment %s: %v\nOutput: %s", name, err, out)
 	}
 	return string(out)
+}
+
+func (h *Harness) DumpDNSDiagnostics(podName, container string) {
+	h.t.Helper()
+	cmdResolv := exec.Command("kubectl", "exec", podName, "-c", container, "--", "cat", "/etc/resolv.conf")
+	outResolv, errResolv := cmdResolv.CombinedOutput()
+	if errResolv != nil {
+		h.t.Logf("Failed to get /etc/resolv.conf from pod %s: %v\nOutput: %s", podName, errResolv, outResolv)
+	} else {
+		h.t.Logf("Pod %s /etc/resolv.conf:\n%s", podName, string(outResolv))
+	}
+
+	cmdPods := exec.Command("kubectl", "-n", "kube-system", "get", "pods", "-l", "k8s-app=kube-dns", "-o", "wide")
+	outPods, errPods := cmdPods.CombinedOutput()
+	if errPods != nil {
+		h.t.Logf("Failed to get kube-dns pods: %v\nOutput: %s", errPods, outPods)
+	} else {
+		h.t.Logf("kube-dns pods:\n%s", string(outPods))
+	}
+
+	cmdSlices := exec.Command("kubectl", "-n", "kube-system", "get", "endpointslices", "-l", "kubernetes.io/service-name=kube-dns", "-o", "wide")
+	outSlices, errSlices := cmdSlices.CombinedOutput()
+	if errSlices != nil {
+		h.t.Logf("Failed to get kube-dns endpointslices: %v\nOutput: %s", errSlices, outSlices)
+	} else {
+		h.t.Logf("kube-dns endpointslices:\n%s", string(outSlices))
+	}
 }

@@ -911,6 +911,7 @@ spec:
 			"/app/toolbox", "probe", "dns", "cluster", "backend", "5s")
 		outProbe, errProbe := cmdProbe.CombinedOutput()
 		if errProbe != nil {
+			h.DumpDNSDiagnostics(clientPodName, "workload")
 			t.Fatalf("expected cluster DNS probe to succeed, but failed: %v (output: %s)", errProbe, outProbe)
 		}
 		t.Logf("cluster DNS probe succeeded: %s", outProbe)
@@ -920,6 +921,7 @@ spec:
 			"nslookup", "backend")
 		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
 		if errNslookup != nil {
+			h.DumpDNSDiagnostics(clientPodName, "workload")
 			t.Fatalf("expected cluster nslookup to succeed, but failed: %v (output: %s)", errNslookup, outNslookup)
 		}
 		t.Logf("cluster nslookup succeeded: %s", outNslookup)

@@ -155,14 +155,50 @@ func runProbe(args []string) {
 		}
 
 		if server == "cluster" || server == "default" {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-			ips, err := net.DefaultResolver.LookupHost(ctx, name)
-			if err != nil {
-				log.Fatalf("dns lookup of %s failed: %v", name, err)
+			deadline := time.Now().Add(timeout)
+			backoff := 50 * time.Millisecond
+			maxBackoff := 500 * time.Millisecond
+			var lastErr error
+
+			for {
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					break
+				}
+				attemptTimeout := remaining
+				if attemptTimeout > 1*time.Second {
+					attemptTimeout = 1 * time.Second
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+				ips, err := net.DefaultResolver.LookupHost(ctx, name)
+				cancel()
+				if err == nil {
+					fmt.Printf("RESOLVED %s: %v\n", name, ips)
+					os.Exit(0)
+				}
+				lastErr = err
+
+				if time.Until(deadline) <= 0 {
+					break
+				}
+				sleepTime := backoff
+				if rem := time.Until(deadline); sleepTime > rem {
+					sleepTime = rem
+				}
+				time.Sleep(sleepTime)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 			}
-			fmt.Printf("RESOLVED %s: %v\n", name, ips)
-			os.Exit(0)
+
+			resolv, err := os.ReadFile("/etc/resolv.conf")
+			if err != nil {
+				log.Printf("failed to read /etc/resolv.conf: %v", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "/etc/resolv.conf:\n%s\n", string(resolv))
+			}
+			log.Fatalf("dns lookup of %s failed: %v", name, lastErr)
 		}
 
 		serverAddr := server

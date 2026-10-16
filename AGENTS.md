@@ -26,7 +26,7 @@
 - **`k8s/manifests.yaml`**: Manifest for deploying standalone cluster-wide service mode.
 - **`tests/e2e/`**: KinD-based integration tests verifying both standalone service and transparent sidecar TLS interception and credential injection.
 - **`dev/ci/presubmits/`**: CI validation scripts: `ap-build`, `ap-test`, `ap-lint`, `ap-verify-generate`, and `ap-e2e`.
-- **`dev/tasks/`**: Local development tasks: `deploy-to-kube`, `create-test-certificates`, `test-e2e`.
+- **`dev/tasks/`**: Local development tasks: `deploy-to-kube`, `create-test-certificates`. (E2E tests are executed via `ap e2e .` or `RUN_E2E=1 go test -v ./tests/e2e/...` using ap's built-in Go e2e runner).
 
 ---
 
