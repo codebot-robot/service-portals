@@ -44,3 +44,4 @@ init-service-portals [flags]
 | `CA_PRIVATE_DIR` | `/etc/service-portal/ca-private` | Passed to `-key-dir`. |
 | `CHOWN_UID` | `-1` | Passed to `-chown-uid`. |
 | `CHOWN_GID` | `-1` | Passed to `-chown-gid`. |
+| `DNS_SERVER_IPS` | `/etc/resolv.conf` nameservers | Comma-separated list of DNS server IPs allowed for outbound port 53 traffic. If unset, automatically reads nameservers from `/etc/resolv.conf`. |

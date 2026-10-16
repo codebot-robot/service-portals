@@ -23,6 +23,11 @@ CA_DIR=${CA_DIR:-/etc/service-portal/ca}
 CA_PRIVATE_DIR=${CA_PRIVATE_DIR:-/etc/service-portal/ca-private}
 CHOWN_UID=${CHOWN_UID:--1}
 CHOWN_GID=${CHOWN_GID:--1}
+DNS_SERVER_IPS=${DNS_SERVER_IPS:-}
+
+if [ -z "${DNS_SERVER_IPS}" ] && [ -f /etc/resolv.conf ]; then
+  DNS_SERVER_IPS=$(grep -E '^\s*nameserver\s+' /etc/resolv.conf | awk '{print $2}' | tr '\n' ',' | sed 's/,$//')
+fi
 
 if [ -x /usr/local/bin/init-service-portals ]; then
   echo "Generating CA certificate in ${CA_DIR} and private cert/key in ${CA_PRIVATE_DIR} with chown ${CHOWN_UID}:${CHOWN_GID}..."
@@ -34,6 +39,7 @@ echo "PROXY_PORT: ${PROXY_PORT}"
 echo "PROXY_HTTPS_PORT: ${PROXY_HTTPS_PORT}"
 echo "PROXY_UID: ${PROXY_UID}"
 echo "INTERCEPT_PORTS: ${INTERCEPT_PORTS}"
+echo "DNS_SERVER_IPS: ${DNS_SERVER_IPS}"
 
 # ==================== NAT Redirection ====================
 
@@ -72,11 +78,11 @@ fi
 # 1. Allow all loopback traffic
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# 2. Allow all traffic to localhost (127.0.0.1) and the proxy ports.
+# 2. Allow all traffic to localhost (127.0.0.1) and the proxy ports on localhost.
 # This is crucial for locally-generated redirected packets to bypass the egress filter block.
 iptables -A OUTPUT -d 127.0.0.1 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport "${PROXY_PORT}" -j ACCEPT
-iptables -A OUTPUT -p tcp --dport "${PROXY_HTTPS_PORT}" -j ACCEPT
+iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport "${PROXY_PORT}" -j ACCEPT
+iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport "${PROXY_HTTPS_PORT}" -j ACCEPT
 
 # 3. Allow established and related connections (essential for inbound probes and active connections)
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -84,9 +90,18 @@ iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 # 4. Allow all outbound traffic originating from our proxy user (UID 1337) to the external network
 iptables -A OUTPUT -m owner --uid-owner "${PROXY_UID}" -j ACCEPT
 
-# 5. Allow DNS requests (UDP and TCP on port 53) so the workload can resolve hostnames
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+# 5. Allow DNS requests (UDP and TCP on port 53) to allowed DNS servers so the workload can resolve hostnames
+if [ -n "${DNS_SERVER_IPS}" ]; then
+  echo "Restricting DNS egress to: ${DNS_SERVER_IPS}"
+  for ip in $(echo "${DNS_SERVER_IPS}" | tr ',' ' '); do
+    iptables -A OUTPUT -d "$ip" -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -d "$ip" -p tcp --dport 53 -j ACCEPT
+  done
+else
+  echo "Warning: No DNS server IPs found; allowing all port 53 traffic"
+  iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+  iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+fi
 
 # 6. Reject/drop all other outbound TCP and UDP traffic from the pod to external networks.
 # This prevents workload processes from bypassing the proxy by using unauthorized ports or connecting directly.
