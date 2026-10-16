@@ -1,0 +1,93 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: resource.k8s.io/v1beta1
+kind: DeviceClass
+metadata:
+  name: portal-egress.portals.gke.io
+spec:
+  selectors:
+  - cel:
+      expression: device.driver == "portal-egress.portals.gke.io"
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceClaimTemplate
+metadata:
+  name: portal-egress-template
+spec:
+  spec:
+    devices:
+      requests:
+      - name: portal-egress
+        deviceClassName: portal-egress.portals.gke.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dra-portal-driver
+  namespace: kube-system
+  labels:
+    app: dra-portal-driver
+spec:
+  selector:
+    matchLabels:
+      app: dra-portal-driver
+  template:
+    metadata:
+      labels:
+        app: dra-portal-driver
+    spec:
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: driver
+        image: dra-portal-driver:e2e
+        imagePullPolicy: Never
+        args:
+        - "--hook-copy-target=/host/usr/local/bin/portal-cdi-hook"
+        - "--hook-host-path=/usr/local/bin/portal-cdi-hook"
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: plugins-registry
+          mountPath: /var/lib/kubelet/plugins_registry
+          mountPropagation: Bidirectional
+        - name: plugins
+          mountPath: /var/lib/kubelet/plugins
+          mountPropagation: Bidirectional
+        - name: cdi
+          mountPath: /etc/cdi
+        - name: ca
+          mountPath: /var/run/service-portal/ca
+        - name: host-bin
+          mountPath: /host/usr/local/bin
+      volumes:
+      - name: plugins-registry
+        hostPath:
+          path: /var/lib/kubelet/plugins_registry
+      - name: plugins
+        hostPath:
+          path: /var/lib/kubelet/plugins
+      - name: cdi
+        hostPath:
+          path: /etc/cdi
+      - name: ca
+        hostPath:
+          path: /var/run/service-portal/ca
+      - name: host-bin
+        hostPath:
+          path: /usr/local/bin
