@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -616,4 +617,609 @@ spec:
 	if !strings.Contains(logsGithubHTTPS, "Bearer github-sidecar-token") {
 		t.Error("GitHub HTTPS Logs do not contain correct token")
 	}
+}
+
+func TestDRAEgressDenied(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "dra-egress-denied-e2e")
+	h.SetupWithDRA()
+
+	gitRoot := h.GetGitRoot()
+
+	// 1. Build and load images
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+	h.DockerBuild("dra-portal-driver:e2e", filepath.Join(gitRoot, "images/dra-portal-driver/Dockerfile"), gitRoot)
+
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("toolbox:e2e")
+	h.KindLoad("dra-portal-driver:e2e")
+
+	// 2. Deploy Backend (Toolbox Server with two ports: 80 and 8080)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: alt
+    port: 8080
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+	time.Sleep(5 * time.Second)
+
+	backendClusterIP := h.GetServiceClusterIP("backend")
+	t.Logf("Backend ClusterIP: %s", backendClusterIP)
+
+	// 3. Deploy DRA Driver and Resources
+	nodeName := h.ClusterName + "-control-plane"
+	draManifest := fmt.Sprintf(`
+apiVersion: resource.k8s.io/v1beta1
+kind: DeviceClass
+metadata:
+  name: portal-egress.portals.gke.io
+spec:
+  selectors:
+  - cel:
+      expression: device.driver == "portal-egress.portals.gke.io"
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceClaimTemplate
+metadata:
+  name: portal-egress-template
+spec:
+  spec:
+    devices:
+      requests:
+      - name: portal-egress
+        deviceClassName: portal-egress.portals.gke.io
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceSlice
+metadata:
+  name: %[1]s-portal-egress
+spec:
+  driver: portal-egress.portals.gke.io
+  pool:
+    name: portal-egress
+    generation: 1
+    resourceSliceCount: 1
+  nodeName: %[1]s
+  devices:
+  - name: egress-0
+    basic:
+      attributes:
+        type:
+          string: "portal-egress"
+  - name: egress-1
+    basic:
+      attributes:
+        type:
+          string: "portal-egress"
+  - name: egress-2
+    basic:
+      attributes:
+        type:
+          string: "portal-egress"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dra-portal-driver
+  namespace: kube-system
+  labels:
+    app: dra-portal-driver
+spec:
+  selector:
+    matchLabels:
+      app: dra-portal-driver
+  template:
+    metadata:
+      labels:
+        app: dra-portal-driver
+    spec:
+      hostNetwork: true
+      hostPID: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: driver
+        image: dra-portal-driver:e2e
+        imagePullPolicy: Never
+        args:
+        - "--hook-copy-target=/host/usr/local/bin/portal-cdi-hook"
+        - "--hook-host-path=/usr/local/bin/portal-cdi-hook"
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: plugins-registry
+          mountPath: /var/lib/kubelet/plugins_registry
+          mountPropagation: Bidirectional
+        - name: plugins
+          mountPath: /var/lib/kubelet/plugins
+          mountPropagation: Bidirectional
+        - name: cdi
+          mountPath: /etc/cdi
+        - name: ca
+          mountPath: /var/run/service-portal/ca
+        - name: host-bin
+          mountPath: /host/usr/local/bin
+      volumes:
+      - name: plugins-registry
+        hostPath:
+          path: /var/lib/kubelet/plugins_registry
+      - name: plugins
+        hostPath:
+          path: /var/lib/kubelet/plugins
+      - name: cdi
+        hostPath:
+          path: /etc/cdi
+      - name: ca
+        hostPath:
+          path: /var/run/service-portal/ca
+      - name: host-bin
+        hostPath:
+          path: /usr/local/bin
+`, nodeName)
+
+	h.KubectlApplyContent(draManifest)
+	h.WaitForPodReady("app=dra-portal-driver", 2*time.Minute)
+	time.Sleep(5 * time.Second)
+
+	// 4. Test Fail-Closed Semantics:
+	// A pod referencing an unfulfillable/down DRA driver MUST remain Pending and NEVER start unprotected.
+	t.Run("FailClosed_UnregisteredPlugin", func(t *testing.T) {
+		failClosedPodName := "test-fail-closed-pod"
+		h.DeletePod(failClosedPodName)
+
+		failClosedManifest := fmt.Sprintf(`
+apiVersion: resource.k8s.io/v1beta1
+kind: DeviceClass
+metadata:
+  name: offline-driver.example.com
+spec:
+  selectors:
+  - cel:
+      expression: device.driver == "offline-driver.example.com"
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceSlice
+metadata:
+  name: %[1]s-offline-slice
+spec:
+  driver: offline-driver.example.com
+  pool:
+    name: offline-pool
+    generation: 1
+    resourceSliceCount: 1
+  nodeName: %[1]s
+  devices:
+  - name: offline-dev-0
+    basic:
+      attributes:
+        test:
+          string: "true"
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceClaimTemplate
+metadata:
+  name: offline-claim-template
+spec:
+  spec:
+    devices:
+      requests:
+      - name: offline-dev
+        deviceClassName: offline-driver.example.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-fail-closed-pod
+spec:
+  resourceClaims:
+  - name: dev
+    resourceClaimTemplateName: offline-claim-template
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/bin/sh", "-c", "echo 'UNPROTECTED RUN'; sleep 3600"]
+    resources:
+      claims:
+      - name: dev
+`, nodeName)
+
+		h.KubectlApplyContent(failClosedManifest)
+		// Wait 10s and verify the pod phase is Pending
+		time.Sleep(10 * time.Second)
+
+		cmdStatus := exec.Command("kubectl", "get", "pod", failClosedPodName, "-o", "jsonpath={.status.phase}")
+		outStatus, err := cmdStatus.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed checking fail-closed pod status: %v", err)
+		}
+		status := strings.TrimSpace(string(outStatus))
+		if status != "Pending" {
+			t.Fatalf("expected fail-closed pod to stay Pending, but got phase: %s", status)
+		}
+
+		// Verify event shows FailedPrepareDynamicResources
+		cmdEvents := exec.Command("kubectl", "describe", "pod", failClosedPodName)
+		outEvents, _ := cmdEvents.CombinedOutput()
+		if !strings.Contains(string(outEvents), "FailedPrepareDynamicResources") {
+			t.Logf("Pod events: %s", outEvents)
+			t.Errorf("expected FailedPrepareDynamicResources in pod events")
+		}
+		h.DeletePod(failClosedPodName)
+	})
+
+	// 5. Deploy Client Pod with DRA Claim and Sidecar
+	clientPodName := "test-client-dra-deny"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sidecar-portal-deny-rules-secret
+stringData:
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: http://backend
+      authToken: gemini-sidecar-token
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: http://backend
+      authToken: github-sidecar-token
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-dra-deny
+  labels:
+    app: test-client-dra-deny
+spec:
+  resourceClaims:
+  - name: portal-egress
+    resourceClaimTemplateName: portal-egress-template
+  hostAliases:
+  - ip: "8.8.8.8"
+    hostnames:
+    - "gemini.backend"
+    - "github.backend"
+    - "other.backend"
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+    resources:
+      claims:
+      - name: portal-egress
+  - name: service-portal-sidecar
+    image: all-in-one-portal:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1337
+      runAsGroup: 1337
+    env:
+    - name: CA_CERT_PATH
+      value: "/etc/service-portal/ca/tls.crt"
+    - name: CA_KEY_PATH
+      value: "/etc/service-portal/ca/tls.key"
+    args: ["--rules-dir=/etc/portals"]
+    volumeMounts:
+    - name: rules-volume
+      mountPath: /etc/portals
+      readOnly: true
+    - name: ca-key
+      mountPath: /etc/service-portal/ca
+      readOnly: true
+  volumes:
+  - name: rules-volume
+    secret:
+      secretName: sidecar-portal-deny-rules-secret
+  - name: ca-key
+    hostPath:
+      path: /var/run/service-portal/ca
+`
+	h.KubectlApplyContent(clientManifest)
+	h.WaitForPodReady("app=test-client-dra-deny", 2*time.Minute)
+
+	// 6. Verify Invisibility and Specification Requirements
+	t.Run("PodSpec_NoInitContainers_NoNetAdmin", func(t *testing.T) {
+		// Assert no init containers in the pod
+		cmdInit := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.spec.initContainers}")
+		outInit, err := cmdInit.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed checking initContainers: %v", err)
+		}
+		if len(strings.TrimSpace(string(outInit))) > 0 {
+			t.Fatalf("expected NO init containers in workload pod, got: %s", outInit)
+		}
+
+		// Assert no NET_ADMIN capability in workload container
+		cmdCaps := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.spec.containers[0].securityContext.capabilities.add}")
+		outCaps, err := cmdCaps.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed checking capabilities: %v", err)
+		}
+		if strings.Contains(string(outCaps), "NET_ADMIN") {
+			t.Fatalf("workload container unexpectedly contains NET_ADMIN capability: %s", outCaps)
+		}
+
+		// Assert workload spec has no portal-specific volume mounts or SSL env (injected dynamically via CDI)
+		cmdMounts := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.spec.containers[0].volumeMounts}")
+		outMounts, _ := cmdMounts.CombinedOutput()
+		if strings.Contains(string(outMounts), "service-portal") {
+			t.Fatalf("workload container spec unexpectedly contains portal volume mount: %s", outMounts)
+		}
+
+		cmdEnv := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.spec.containers[0].env}")
+		outEnv, _ := cmdEnv.CombinedOutput()
+		if strings.Contains(string(outEnv), "SSL_CERT_FILE") {
+			t.Fatalf("workload container spec unexpectedly contains SSL_CERT_FILE env: %s", outEnv)
+		}
+	})
+
+	t.Run("CDI_Injected_EnvAndMount", func(t *testing.T) {
+		// Assert SSL_CERT_FILE is present inside the running container (injected by CDI)
+		cmdEnv := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "env")
+		outEnv, err := cmdEnv.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed reading container env: %v (output: %s)", err, outEnv)
+		}
+		if !strings.Contains(string(outEnv), "SSL_CERT_FILE=/etc/service-portal/ca/tls.crt") {
+			t.Fatalf("container environment missing CDI-injected SSL_CERT_FILE: %s", outEnv)
+		}
+
+		// Assert CA certificate exists inside the running container (injected by CDI mount)
+		cmdCA := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "cat", "/etc/service-portal/ca/tls.crt")
+		outCA, err := cmdCA.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed reading /etc/service-portal/ca/tls.crt: %v (output: %s)", err, outCA)
+		}
+		if !strings.Contains(string(outCA), "BEGIN CERTIFICATE") {
+			t.Fatalf("invalid CA certificate at /etc/service-portal/ca/tls.crt: %s", outCA)
+		}
+	})
+
+	// 7. TestSidecarEgressDenied Semantics
+	// Case 1: Direct IP, intercepted port (must fail and never reach backend)
+	t.Run("DirectIP_InterceptedPort_HTTP", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://"+backendClusterIP+":80/direct-ip-http")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IP HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IP HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ip-http") {
+			t.Fatalf("backend access log contains /direct-ip-http, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("DirectIP_InterceptedPort_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "https://"+backendClusterIP+":443/direct-ip-https")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IP HTTPS request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IP HTTPS request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ip-https") {
+			t.Fatalf("backend access log contains /direct-ip-https, request unexpectedly reached backend")
+		}
+	})
+
+	// Case 2: Unlisted hostname, intercepted port (must fail and never reach backend)
+	t.Run("UnlistedHostname_InterceptedPort_HTTP", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://other.backend/unlisted-http")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected unlisted host HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("unlisted host HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/unlisted-http") {
+			t.Fatalf("backend access log contains /unlisted-http, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("UnlistedHostname_InterceptedPort_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "https://other.backend/unlisted-https")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected unlisted host HTTPS request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("unlisted host HTTPS request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/unlisted-https") {
+			t.Fatalf("backend access log contains /unlisted-https, request unexpectedly reached backend")
+		}
+	})
+
+	// Case 3: Non-intercepted port (must be rejected by egress filter)
+	t.Run("NonInterceptedPort_HTTP_8080", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://backend:8080/non-intercepted-8080")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-intercepted port HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("non-intercepted port HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/non-intercepted-8080") {
+			t.Fatalf("backend access log contains /non-intercepted-8080, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("NonInterceptedPort_RawTCP_9999", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "tcp", backendClusterIP+":9999", "3s")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected raw TCP connection to port 9999 to fail, but it succeeded: %s", out)
+		}
+		t.Logf("raw TCP connection to port 9999 failed as expected: %v (output: %s)", err, out)
+	})
+
+	// Case 4: Arbitrary DNS (must fail, but cluster DNS resolution must work)
+	t.Run("ArbitraryDNS_Blocked", func(t *testing.T) {
+		// Probe external DNS server (8.8.8.8) using toolbox probe
+		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "dns", "8.8.8.8", "example.com", "3s")
+		outProbe, errProbe := cmdProbe.CombinedOutput()
+		if errProbe == nil {
+			t.Fatalf("expected DNS probe to 8.8.8.8 to fail, but it succeeded: %s", outProbe)
+		}
+		t.Logf("toolbox probe dns to 8.8.8.8 failed as expected: %v (output: %s)", errProbe, outProbe)
+	})
+
+	t.Run("ClusterDNS_Allowed", func(t *testing.T) {
+		// Probe cluster DNS resolution using toolbox probe
+		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "dns", "cluster", "backend", "5s")
+		outProbe, errProbe := cmdProbe.CombinedOutput()
+		if errProbe != nil {
+			cmdDiag := exec.Command("docker", "exec", nodeName, "cat", "/var/log/portal-cdi-hook.log")
+			diag, _ := cmdDiag.CombinedOutput()
+			t.Logf("CDI hook log: %s", string(diag))
+			t.Fatalf("expected cluster DNS probe to succeed, but failed: %v (output: %s)", errProbe, outProbe)
+		}
+		t.Logf("cluster DNS probe succeeded: %s", outProbe)
+	})
+
+	// Case 5: Positive control (asserts health, transparent interception, token swap, and CA trust)
+	t.Run("PositiveControl_GeminiHTTPS", func(t *testing.T) {
+		// Assert HTTPS request using the CDI-mounted CA certificate succeeds
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://gemini.backend/positive-control")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control HTTPS request failed: %v (output: %s)", err, out)
+		}
+		logs := string(out)
+		t.Logf("positive control HTTPS output: %s", logs)
+
+		if !strings.Contains(logs, "Authorization") {
+			t.Errorf("positive control output missing Authorization header: %s", logs)
+		}
+		if !strings.Contains(logs, "Bearer gemini-sidecar-token") {
+			t.Errorf("positive control output missing expected token: %s", logs)
+		}
+
+		// Also assert HTTP request succeeds
+		cmdHTTP := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-qO-", "http://gemini.backend/positive-control-http")
+		outHTTP, errHTTP := cmdHTTP.CombinedOutput()
+		if errHTTP != nil {
+			t.Fatalf("positive control HTTP request failed: %v (output: %s)", errHTTP, outHTTP)
+		}
+		if !strings.Contains(string(outHTTP), "Bearer gemini-sidecar-token") {
+			t.Errorf("positive control HTTP output missing expected token: %s", outHTTP)
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/positive-control") {
+			t.Fatalf("backend access log missing /positive-control")
+		}
+	})
+
+	// Case 6: Bypass attempt
+	t.Run("BypassAttempt_Disallowed", func(t *testing.T) {
+		// 1. Assert workload container UID is not 1337
+		cmdUID := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "id", "-u")
+		outUID, errUID := cmdUID.CombinedOutput()
+		if errUID != nil {
+			t.Fatalf("failed to get workload UID: %v (output: %s)", errUID, outUID)
+		}
+		uid := strings.TrimSpace(string(outUID))
+		if uid == "1337" {
+			t.Fatalf("workload container UID is unexpectedly 1337 (proxy UID)")
+		}
+		if uid != "1000" {
+			t.Errorf("expected workload UID to be 1000, got %s", uid)
+		}
+
+		// 2. Directly assert allowPrivilegeEscalation: false via NoNewPrivs kernel flag
+		cmdNoNewPrivs := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"grep", "NoNewPrivs", "/proc/self/status")
+		outNoNewPrivs, errNoNewPrivs := cmdNoNewPrivs.CombinedOutput()
+		if errNoNewPrivs != nil {
+			t.Fatalf("failed to read /proc/self/status for NoNewPrivs: %v (output: %s)", errNoNewPrivs, outNoNewPrivs)
+		}
+		status := strings.TrimSpace(string(outNoNewPrivs))
+		t.Logf("workload NoNewPrivs status: %s", status)
+		if !strings.Contains(status, "NoNewPrivs:\t1") && !strings.Contains(status, "NoNewPrivs: 1") {
+			t.Fatalf("expected NoNewPrivs to be 1 (allowPrivilegeEscalation: false), got: %q", status)
+		}
+
+		// 3. Attempting to switch to proxy UID 1337 fails
+		cmdSu := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"su", "-", "1337", "-c", "id")
+		outSu, errSu := cmdSu.CombinedOutput()
+		if errSu == nil {
+			t.Fatalf("expected su to UID 1337 to fail, but it succeeded: %s", outSu)
+		}
+		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
+	})
 }

@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -46,6 +47,58 @@ func (h *Harness) Setup() {
 
 	h.t.Logf("Creating cluster %s", h.ClusterName)
 	cmd = exec.Command("kind", "create", "cluster", "--name", h.ClusterName)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Fatalf("Failed to create cluster: %v\nOutput: %s", err, out)
+	}
+
+	h.t.Cleanup(func() {
+		h.Teardown()
+	})
+}
+
+func (h *Harness) SetupWithDRA() {
+	h.t.Helper()
+	// Check if cluster exists
+	cmd := exec.Command("kind", "get", "clusters")
+	out, err := cmd.Output()
+	if err == nil && strings.Contains(string(out), h.ClusterName) {
+		h.t.Logf("Cluster %s already exists", h.ClusterName)
+		return
+	}
+
+	configFile, err := os.CreateTemp("", "kind-dra-*.yaml")
+	if err != nil {
+		h.t.Fatalf("Failed to create temp kind config: %v", err)
+	}
+	defer func() {
+		if err := os.Remove(configFile.Name()); err != nil && !os.IsNotExist(err) {
+			h.t.Logf("Warning: failed removing temp kind config %s: %v", configFile.Name(), err)
+		}
+	}()
+
+	kindConfig := `kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+featureGates:
+  DynamicResourceAllocation: true
+runtimeConfig:
+  "resource.k8s.io/v1beta1": "true"
+nodes:
+- role: control-plane
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri"]
+    enable_cdi = true
+    cdi_spec_dirs = ["/etc/cdi", "/var/run/cdi"]
+`
+	if _, err := configFile.WriteString(kindConfig); err != nil {
+		h.t.Fatalf("Failed to write temp kind config: %v", err)
+	}
+	if err := configFile.Close(); err != nil {
+		h.t.Fatalf("Failed to close temp kind config: %v", err)
+	}
+
+	h.t.Logf("Creating cluster %s with DRA and CDI enabled", h.ClusterName)
+	cmd = exec.Command("kind", "create", "cluster", "--name", h.ClusterName, "--config", configFile.Name())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		h.t.Fatalf("Failed to create cluster: %v\nOutput: %s", err, out)
 	}
@@ -119,7 +172,7 @@ func (h *Harness) WaitForPodReady(labelSelector string, timeout time.Duration) {
 func (h *Harness) DeletePod(name string) {
 	h.t.Helper()
 	// Ignore errors if pod doesn't exist
-	if err := exec.Command("kubectl", "delete", "pod", name, "--ignore-not-found").Run(); err != nil {
+	if err := exec.Command("kubectl", "delete", "pod", name, "--force", "--grace-period=0", "--ignore-not-found").Run(); err != nil {
 		h.t.Logf("Failed to delete pod %s: %v", name, err)
 	}
 }
@@ -157,4 +210,24 @@ func (h *Harness) WaitForPodSuccess(name string, timeout time.Duration) {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+func (h *Harness) GetServiceClusterIP(name string) string {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "get", "service", name, "-o", "jsonpath={.spec.clusterIP}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.t.Fatalf("Failed to get ClusterIP for service %s: %v\nOutput: %s", name, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (h *Harness) GetDeploymentLogs(name string) string {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "logs", "deployment/"+name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.t.Fatalf("Failed to get logs for deployment %s: %v\nOutput: %s", name, err, out)
+	}
+	return string(out)
 }
