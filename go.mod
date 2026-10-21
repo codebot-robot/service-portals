@@ -1,8 +1,8 @@
 module github.com/gke-labs/service-portals
 
-go 1.27.1
+go 1.27.2
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 require (
 	cloud.google.com/go/ai v1.2.0
